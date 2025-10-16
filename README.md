@@ -23,9 +23,9 @@ There are several other building targets:
 
 StrasGPT is directly compatible with HuggingFace format. At the university, files are directly provided on Parallel Programming virtual machines (see `~/partage/` folder). You can also download the smallest models directly from Seafile:
 - Password is `mastermathinfo`
-- [Llama 3.2 1B (2.5 GB)](https://seafile.unistra.fr/d/64f6233917764f3aad29/)
-- [Llama 3.2 3B (6.5 GB)](https://seafile.unistra.fr/d/665bfbc151b149458818/)
-- [Llama 3.1 8B (12 GB)](https://seafile.unistra.fr/d/6e5da22479474500acd1/)
+- [Llama 3.2 1B (2.5 GB)](https://seafile.unistra.fr/f/049e25022496491a86f0/)
+- [Llama 3.2 3B (6.4 GB)](https://seafile.unistra.fr/f/4cec4971b4f044afaff3/)
+- [Llama 3.1 8B (16.1 GB)](https://seafile.unistra.fr/f/c6864b246576405d944d/)
 
 Out of the university, we can get LLaMa 3.x checkpoints from HuggingFace. In this case you will need to create an [HuggingFace Account](https://huggingface.co/), and get an access token (click on your profile icon, then "Access Tokens"). Finally you'll need to login then to download the desired models, e.g.:
 

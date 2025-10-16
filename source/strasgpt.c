@@ -28,6 +28,9 @@
 
 extern int json_scanner_lex_destroy(void);
 
+// Global variables for MPI rank/size we may declare extern in other files
+int mpi_rank, mpi_size;
+
 // Return time in milliseconds, for benchmarking the model speed
 static long time_in_ms(void) {
   struct timespec time;
@@ -53,14 +56,13 @@ static double peak_rss_gb(void) {
 
 int main(int argc, char* argv[]) {
   // Let all processes and threads print their IDs
-  if (MPI_Init(NULL, NULL) != MPI_SUCCESS) {
+  if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     UTIL_DIE("MPI_Init failed");
   }
-  int rank, size;
-  if (MPI_Comm_rank(MPI_COMM_WORLD, &rank) != MPI_SUCCESS) {
+  if (MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank) != MPI_SUCCESS) {
     UTIL_DIE("MPI_Comm_rank failed");
   }
-  if (MPI_Comm_size(MPI_COMM_WORLD, &size) != MPI_SUCCESS) {
+  if (MPI_Comm_size(MPI_COMM_WORLD, &mpi_size) != MPI_SUCCESS) {
     UTIL_DIE("MPI_Comm_size failed");
   }
 
@@ -70,16 +72,11 @@ int main(int argc, char* argv[]) {
       "StrasGPT OpenMP thread %2d (total %2d) of MPI rank %2d (total %2d)\n",
       omp_get_thread_num(),
       omp_get_num_threads(),
-      rank,
-      size
+      mpi_rank,
+      mpi_size
   );
 
-  if (MPI_Finalize() != MPI_SUCCESS) {
-    UTIL_DIE("MPI_Finalize failed");
-  }
-  if (rank != 0) {
-    return EXIT_SUCCESS;
-  } else {
+  if (mpi_rank == 0) {
     fprintf(stderr, "\n");
   }
 
@@ -237,5 +234,10 @@ int main(int argc, char* argv[]) {
   free(logits);
   free(token);
   json_scanner_lex_destroy();
+
+  if (MPI_Finalize() != MPI_SUCCESS) {
+    UTIL_DIE("MPI_Finalize failed");
+  }
+
   return EXIT_SUCCESS;
 }
