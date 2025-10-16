@@ -1,0 +1,29 @@
+# Compiled files
+*.o
+*.lo
+*.a
+*.la
+*.d
+*.so
+*.out
+*.exe
+.libs/
+.deps/
+.dirstamp
+
+# Build directories
+build/
+bin/
+obj/
+
+# Binary
+strasgpt
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# OS-specific
+.DS_Store
+Thumbs.db
