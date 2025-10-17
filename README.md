@@ -65,8 +65,8 @@ Transformer:
 [Once upon a time there were three] little pigs.
 Three little pigs went out for a pig walk. They heard music playing
 
-Prompt processing (prefill):  8 tokens in 3.802 s (2.104156 token/s)
-Token generation  (decode):  16 tokens in 9.333 s (1.714347 token/s)
+Prompt processing (prefill):  8 tokens in 0.399 s (20.050125 token/s)
+Token generation  (decode):  16 tokens in 0.990 s (16.161616 token/s)
 ```
 
 Pretty slow, but you'll soon improve that!
