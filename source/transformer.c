@@ -778,7 +778,7 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   util_matrix_summary(s, 1, out_norm_len, 3, w->out_norm_weight);
 
   if (c->aliased_out_weight) {
-    fprintf(f, "--- %9s (%7.4f GB): alias to embedding", "out", 0.);
+    fprintf(f, "--- %9s (%7.4f GB): alias to embedding\n", "out", 0.);
   } else {
     snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "out", out_gb);
     util_matrix_summary(s, 1, out_len, 3, w->out_weight);
