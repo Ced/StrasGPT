@@ -61,20 +61,35 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   size_t logits_len = chunk_max_len * t->vocabulary_len;
   size_t rope_len = t->context_len * head_dim;
 
-  s->embedding = calloc(embedding_len, sizeof(*s->embedding));
-  s->mha_norm = calloc(embedding_len, sizeof(*s->mha_norm));
-  s->mha_q = calloc(embedding_len, sizeof(*s->mha_q));
-  s->mha_score = calloc(score_len, sizeof(*s->mha_score));
-  s->mha_att = calloc(embedding_len, sizeof(*s->mha_att));
-  s->mha_out = calloc(embedding_len, sizeof(*s->mha_out));
-  s->ffn_norm = calloc(embedding_len, sizeof(*s->ffn_norm));
-  s->ffn_fc = calloc(hidden_len, sizeof(*s->ffn_fc));
-  s->ffn_up = calloc(hidden_len, sizeof(*s->ffn_up));
-  s->ffn_out = calloc(embedding_len, sizeof(*s->ffn_out));
-  s->logits = calloc(logits_len, sizeof(float));
-  s->k_cache = calloc(cache_len, sizeof(*s->k_cache));
-  s->v_cache = calloc(cache_len, sizeof(*s->v_cache));
-  s->rope_cos_sin = calloc(rope_len, sizeof(*s->rope_cos_sin));
+  size_t embedding_size = embedding_len * sizeof(*s->embedding);
+  size_t mha_norm_size = embedding_len * sizeof(*s->mha_norm);
+  size_t mha_q_size = embedding_len * sizeof(*s->mha_q);
+  size_t mha_score_size = score_len * sizeof(*s->mha_score);
+  size_t mha_att_size = embedding_len * sizeof(*s->mha_att);
+  size_t mha_out_size = embedding_len * sizeof(*s->mha_out);
+  size_t ffn_norm_size = embedding_len * sizeof(*s->ffn_norm);
+  size_t ffn_fc_size = hidden_len * sizeof(*s->ffn_fc);
+  size_t ffn_up_size = hidden_len * sizeof(*s->ffn_up);
+  size_t ffn_out_size = embedding_len * sizeof(*s->ffn_out);
+  size_t logits_size = logits_len * sizeof(*s->logits);
+  size_t k_cache_size = cache_len * sizeof(*s->k_cache);
+  size_t v_cache_size = cache_len * sizeof(*s->v_cache);
+  size_t rope_cos_sin_size = rope_len * sizeof(*s->rope_cos_sin);
+
+  s->embedding = aligned_alloc(UTIL_ALIGNMENT, embedding_size);
+  s->mha_norm = aligned_alloc(UTIL_ALIGNMENT, mha_norm_size);
+  s->mha_q = aligned_alloc(UTIL_ALIGNMENT, mha_q_size);
+  s->mha_score = aligned_alloc(UTIL_ALIGNMENT, mha_score_size);
+  s->mha_att = aligned_alloc(UTIL_ALIGNMENT, mha_att_size);
+  s->mha_out = aligned_alloc(UTIL_ALIGNMENT, mha_out_size);
+  s->ffn_norm = aligned_alloc(UTIL_ALIGNMENT, ffn_norm_size);
+  s->ffn_fc = aligned_alloc(UTIL_ALIGNMENT, ffn_fc_size);
+  s->ffn_up = aligned_alloc(UTIL_ALIGNMENT, ffn_up_size);
+  s->ffn_out = aligned_alloc(UTIL_ALIGNMENT, ffn_out_size);
+  s->logits = aligned_alloc(UTIL_ALIGNMENT, logits_size);
+  s->k_cache = aligned_alloc(UTIL_ALIGNMENT, k_cache_size);
+  s->v_cache = aligned_alloc(UTIL_ALIGNMENT, v_cache_size);
+  s->rope_cos_sin = aligned_alloc(UTIL_ALIGNMENT, rope_cos_sin_size);
 
   // Ensure all mallocs went fine
   if (!s->embedding ||
@@ -554,22 +569,34 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   size_t out_norm_len = t->embedding_dim;
   size_t out_len = t->vocabulary_len * t->embedding_dim;
 
-  w->embedding_weight = calloc(embedding_len, sizeof(*w->embedding_weight));
-  w->mha_norm_weight = calloc(mha_norm_len, sizeof(*w->mha_norm_weight));
-  w->mha_q_weight = calloc(mha_q_len, sizeof(*w->mha_q_weight));
-  w->mha_k_weight = calloc(mha_kv_len, sizeof(*w->mha_k_weight));
-  w->mha_v_weight = calloc(mha_kv_len, sizeof(*w->mha_v_weight));
-  w->mha_out_weight = calloc(mha_out_len, sizeof(*w->mha_out_weight));
-  w->ffn_norm_weight = calloc(ffn_norm_len, sizeof(*w->ffn_norm_weight));
-  w->ffn_fc_weight = calloc(ffn_fc_len, sizeof(*w->ffn_fc_weight));
-  w->ffn_up_weight = calloc(ffn_up_len, sizeof(*w->ffn_up_weight));
-  w->ffn_out_weight = calloc(ffn_out_len, sizeof(*w->ffn_out_weight));
-  w->out_norm_weight = calloc(out_norm_len, sizeof(*w->out_norm_weight));
+  size_t embedding_size = embedding_len * sizeof(*w->embedding_weight);
+  size_t mha_norm_size = mha_norm_len * sizeof(*w->mha_norm_weight);
+  size_t mha_q_size = mha_q_len * sizeof(*w->mha_q_weight);
+  size_t mha_kv_size = mha_kv_len * sizeof(*w->mha_k_weight);
+  size_t mha_out_size = mha_out_len * sizeof(*w->mha_out_weight);
+  size_t ffn_norm_size = ffn_norm_len * sizeof(*w->ffn_norm_weight);
+  size_t ffn_fc_size = ffn_fc_len * sizeof(*w->ffn_fc_weight);
+  size_t fn_up_size = ffn_up_len * sizeof(*w->ffn_up_weight);
+  size_t ffn_out_size = ffn_out_len * sizeof(*w->ffn_out_weight);
+  size_t out_norm_size = out_norm_len * sizeof(*w->out_norm_weight);
+  size_t out_size = out_len * sizeof(*w->out_weight);
+
+  w->embedding_weight = aligned_alloc(UTIL_ALIGNMENT, embedding_size);
+  w->mha_norm_weight = aligned_alloc(UTIL_ALIGNMENT, mha_norm_size);
+  w->mha_q_weight = aligned_alloc(UTIL_ALIGNMENT, mha_q_size);
+  w->mha_k_weight = aligned_alloc(UTIL_ALIGNMENT, mha_kv_size);
+  w->mha_v_weight = aligned_alloc(UTIL_ALIGNMENT, mha_kv_size);
+  w->mha_out_weight = aligned_alloc(UTIL_ALIGNMENT, mha_out_size);
+  w->ffn_norm_weight = aligned_alloc(UTIL_ALIGNMENT, ffn_norm_size);
+  w->ffn_fc_weight = aligned_alloc(UTIL_ALIGNMENT, ffn_fc_size);
+  w->ffn_up_weight = aligned_alloc(UTIL_ALIGNMENT, fn_up_size);
+  w->ffn_out_weight = aligned_alloc(UTIL_ALIGNMENT, ffn_out_size);
+  w->out_norm_weight = aligned_alloc(UTIL_ALIGNMENT, out_norm_size);
   bool is_out_weigth_aliased = aliased_out_weight(t);
   if (is_out_weigth_aliased) {
     w->out_weight = w->embedding_weight;
   } else {
-    w->out_weight = calloc(out_len, sizeof(*w->out_weight));
+    w->out_weight = aligned_alloc(UTIL_ALIGNMENT, out_size);
   }
 
   // Ensure all mallocs went fine
@@ -836,46 +863,155 @@ static void softmax(
   }
 }
 
-// Matrix multiplication
-void matmul(
-    size_t row_count,
-    size_t col_count,
-    size_t red_count,
-    float y[row_count][col_count],
-    float x[row_count][red_count],
-    uint16_t w[col_count][red_count]
+// Dot-product function
+// As the compiler fails to vectorize it, we do it ourselves for both
+// ARM NEON and Intel AVX2 targets. If none is available, use the
+// loop-based version (and suffer slow execution).
+// Note we assume len is multiple of 32 and vectors are 32-bit aligned
+// (which is guaranteed by model and aligned allocation respectively)
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+static inline float dot(
+  size_t len,
+  float activation[restrict len],
+  uint16_t weight[restrict len]
 ) {
-  for (size_t i = 0; i < row_count; i++) {
-    for (size_t j = 0; j < col_count; j++) {
-      y[i][j] = 0.0f;
-      for (size_t k = 0; k < red_count; k++) {
-        y[i][j] += x[i][k] * util_bf16_to_f32(w[j][k]);
-      }
-    }
-  }
-}
+  float32x4_t dot_0 = vdupq_n_f32(0.0);
+  float32x4_t dot_1 = vdupq_n_f32(0.0);
+  float32x4_t dot_2 = vdupq_n_f32(0.0);
+  float32x4_t dot_3 = vdupq_n_f32(0.0);
 
-// Apply RoPE (Rotary Positional Embedding) to a set of vectors,
-// rotateing them in the complex plane according to their position
-void rope(
-    size_t context_len,
-    size_t sequence_len,
-    size_t head_dim,
-    float x[sequence_len][head_dim],
-    float rope_cos_sin[context_len][head_dim],
-    size_t cached_count
-) {
-  for (size_t i = 0; i < sequence_len; i++) {
-    for (size_t j = 0; j < head_dim; j += 2) {
-      float fr = rope_cos_sin[cached_count + i][j];
-      float fi = rope_cos_sin[cached_count + i][j + 1];
-      float v0 = x[i][j];
-      float v1 = x[i][j + 1];
-      x[i][j]     = v0 * fr - v1 * fi;
-      x[i][j + 1] = v0 * fi + v1 * fr;
-    }
+  for (size_t i = 0; i < len; i += 16) {
+    // Read 16 float32 activations
+    float32x4_t activation_0 = vld1q_f32(&activation[i +  0]);
+    float32x4_t activation_1 = vld1q_f32(&activation[i +  4]);
+    float32x4_t activation_2 = vld1q_f32(&activation[i +  8]);
+    float32x4_t activation_3 = vld1q_f32(&activation[i + 12]);
+
+    // Read 16 BF16 weights and expand them to float32
+    // - Load BF16 vectors as uint16
+    uint16x8_t u16_0 = vld1q_u16(&weight[i + 0]);
+    uint16x8_t u16_1 = vld1q_u16(&weight[i + 8]);
+    // - Split low/high halves (4 lanes each)
+    uint16x4_t lo16_0 = vget_low_u16(u16_0);
+    uint16x4_t hi16_0 = vget_high_u16(u16_0);
+    uint16x4_t lo16_1 = vget_low_u16(u16_1);
+    uint16x4_t hi16_1 = vget_high_u16(u16_1);
+    // - Zero-extend u16 values to u32 (BF16 bits in the low 16 bits for now)
+    uint32x4_t lo32_0 = vmovl_u16(lo16_0);
+    uint32x4_t hi32_0 = vmovl_u16(hi16_0);
+    uint32x4_t lo32_1 = vmovl_u16(lo16_1);
+    uint32x4_t hi32_1 = vmovl_u16(hi16_1);
+    // - Shift to put BF16 bits in the high 16 bits, now we have float32
+    lo32_0 = vshlq_n_u32(lo32_0, 16);
+    hi32_0 = vshlq_n_u32(hi32_0, 16);
+    lo32_1 = vshlq_n_u32(lo32_1, 16);
+    hi32_1 = vshlq_n_u32(hi32_1, 16);
+    // - Cast to float32x4_t
+    float32x4_t weight_0 = vreinterpretq_f32_u32(lo32_0);
+    float32x4_t weight_1 = vreinterpretq_f32_u32(hi32_0);
+    float32x4_t weight_2 = vreinterpretq_f32_u32(lo32_1);
+    float32x4_t weight_3 = vreinterpretq_f32_u32(hi32_1);
+
+    // Do the vector dot-product
+    dot_0 = vfmaq_f32(dot_0, activation_0, weight_0);
+    dot_1 = vfmaq_f32(dot_1, activation_1, weight_1);
+    dot_2 = vfmaq_f32(dot_2, activation_2, weight_2);
+    dot_3 = vfmaq_f32(dot_3, activation_3, weight_3);
   }
+
+  // Do the final reduction
+  dot_0 = vaddq_f32(dot_0, dot_1);
+  dot_2 = vaddq_f32(dot_2, dot_3);
+  dot_0 = vaddq_f32(dot_0, dot_2);
+  return vaddvq_f32(dot_0);
 }
+#elif defined __AVX2__
+#include <immintrin.h>
+static inline float dot(
+  size_t len,
+  float activation[restrict len],
+  uint16_t weight[restrict len]
+) {
+  __m256 dot_0 = _mm256_setzero_ps();
+  __m256 dot_1 = _mm256_setzero_ps();
+  __m256 dot_2 = _mm256_setzero_ps();
+  __m256 dot_3 = _mm256_setzero_ps();
+
+  float *a = __builtin_assume_aligned(activation, 32);
+  uint16_t *w = __builtin_assume_aligned(weight, 32);
+
+  for (size_t i = 0; i < len; i += 32) {
+    // Read 32 float32 activations
+    __m256 activation_0 = _mm256_load_ps(&a[i +  0]);
+    __m256 activation_1 = _mm256_load_ps(&a[i +  8]);
+    __m256 activation_2 = _mm256_load_ps(&a[i + 16]);
+    __m256 activation_3 = _mm256_load_ps(&a[i + 24]);
+
+    // Read 32 BF16 weights and expand them to float32
+    // - Load BF16 vectors as int32
+    __m128i u16_0 = _mm_load_si128((const __m128i *)&w[i +  0]);
+    __m128i u16_1 = _mm_load_si128((const __m128i *)&w[i +  8]);
+    __m128i u16_2 = _mm_load_si128((const __m128i *)&w[i + 16]);
+    __m128i u16_3 = _mm_load_si128((const __m128i *)&w[i + 24]);
+    // - Zero-extend u16 values to u32 (BF16 bits in the low 16 bits for now)
+    __m256i u32_0 = _mm256_cvtepu16_epi32(u16_0);
+    __m256i u32_1 = _mm256_cvtepu16_epi32(u16_1);
+    __m256i u32_2 = _mm256_cvtepu16_epi32(u16_2);
+    __m256i u32_3 = _mm256_cvtepu16_epi32(u16_3);
+    // - Shift to put BF16 bits in the high 16 bits, now we have float32
+    u32_0 = _mm256_slli_epi32(u32_0, 16);
+    u32_1 = _mm256_slli_epi32(u32_1, 16);
+    u32_2 = _mm256_slli_epi32(u32_2, 16);
+    u32_3 = _mm256_slli_epi32(u32_3, 16);
+    // Cast to float lanes
+    __m256 weight_0 = _mm256_castsi256_ps(u32_0);
+    __m256 weight_1 = _mm256_castsi256_ps(u32_1);
+    __m256 weight_2 = _mm256_castsi256_ps(u32_2);
+    __m256 weight_3 = _mm256_castsi256_ps(u32_3);
+
+    // Do the vector dot-product
+#if defined(__FMA__)
+    dot_0 = _mm256_fmadd_ps(activation_0, weight_0, dot_0);
+    dot_1 = _mm256_fmadd_ps(activation_1, weight_1, dot_1);
+    dot_2 = _mm256_fmadd_ps(activation_2, weight_2, dot_2);
+    dot_3 = _mm256_fmadd_ps(activation_3, weight_3, dot_3);
+#else
+    dot_0 = _mm256_add_ps(dot_0, _mm256_mul_ps(activation_0, weight_0));
+    dot_1 = _mm256_add_ps(dot_1, _mm256_mul_ps(activation_1, weight_1));
+    dot_2 = _mm256_add_ps(dot_2, _mm256_mul_ps(activation_2, weight_2));
+    dot_3 = _mm256_add_ps(dot_3, _mm256_mul_ps(activation_3, weight_3));
+#endif
+  }
+
+  // Final reduction
+  __m256 dot_01 = _mm256_add_ps(dot_0, dot_1);
+  __m256 dot_23 = _mm256_add_ps(dot_2, dot_3);
+  __m256 sum256 = _mm256_add_ps(dot_01, dot_23);
+  // No "sum all lanes" instruction like vaddvq_f32 on ARM, so work a bit
+  // sum256 holds 8 floats: s0 s1 s2 s3 s4 s5 s6 s7 (below G: garbage)
+  __m128 lo = _mm256_castps256_ps128(sum256); // s0 s1 s2 s3
+  __m128 hi = _mm256_extractf128_ps(sum256, 1); // s3 s4 s5 s6 s7
+  __m128 sum128 = _mm_add_ps(lo, hi); // s0+s4 s1+s5 s2+s6 s3+s7
+  __m128 shuf = _mm_movehdup_ps(sum128); // s1+s5 s1+s5 s3+s7 s3+s7
+  __m128 sums = _mm_add_ps(sum128, shuf); // s0+s4+s1+s5 G s2+s6+s3+s7 G
+  shuf = _mm_movehl_ps(shuf, sums); // s2+s6+s3+s7 G G G
+  sums = _mm_add_ss(sums, shuf); // s0+s4+s1+s5+s2+s6+s3+s7 G G G
+  return _mm_cvtss_f32(sums); // extract total
+}
+#else
+static inline float dot(
+  size_t len,
+  float activation[restrict len],
+  uint16_t weight[restrict len]
+) {
+  float dot = 0.;
+  for (size_t i = 0; i < len; i++) {
+    dot += activation[i] * util_bf16_to_f32(weight[i]);
+  }
+  return dot;
+}
+#endif
 
 // Here is the compute function. Yep, LLMs are just that simple :)!
 // Execute the transformer model on a chunk of tokens, i.e. computes the
@@ -960,12 +1096,8 @@ static void transformer_predict_chunk(
       for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
         for (size_t t = 0; t < token_count; t++) {
           for (size_t h = 0; h < head_dim; h++) {
-            mha_q[k][q][t][h] = 0.0f;
-            for (size_t e = 0; e < embedding_dim; e++) {
-              mha_q[k][q][t][h] +=
-                  mha_norm[t][e] *
-                  util_bf16_to_f32(mha_q_weight[l][k][q][h][e]);
-            }
+            mha_q[k][q][t][h] =
+                dot(embedding_dim, mha_norm[t], mha_q_weight[l][k][q][h]);
           }
         }
       }
@@ -975,11 +1107,8 @@ static void transformer_predict_chunk(
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t t = 0; t < token_count; t++) {
         for (size_t h = 0; h < head_dim; h++) {
-          k_cache[l][k][cached_count + t][h] = 0.0f;
-          for (size_t e = 0; e < embedding_dim; e++) {
-            k_cache[l][k][cached_count + t][h] +=
-                mha_norm[t][e] * util_bf16_to_f32(mha_k_weight[l][k][h][e]);
-          }
+          k_cache[l][k][cached_count + t][h] =
+              dot(embedding_dim, mha_norm[t], mha_k_weight[l][k][h]);
         }
       }
     }
@@ -988,11 +1117,8 @@ static void transformer_predict_chunk(
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t t = 0; t < token_count; t++) {
         for (size_t h = 0; h < head_dim; h++) {
-          v_cache[l][k][cached_count + t][h] = 0.0f;
-          for (size_t e = 0; e < embedding_dim; e++) {
-            v_cache[l][k][cached_count + t][h] +=
-                mha_norm[t][e] * util_bf16_to_f32(mha_v_weight[l][k][h][e]);
-          }
+          v_cache[l][k][cached_count + t][h] =
+              dot(embedding_dim, mha_norm[t], mha_v_weight[l][k][h]);
         }
       }
     }
@@ -1067,11 +1193,10 @@ static void transformer_predict_chunk(
     // 0 <= kqh < embedding_dim (just casting because memory layout is ok)
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
-        mha_out[t][e] = 0.0f;
-        for (size_t kqh = 0; kqh < embedding_dim; kqh++) {
-          mha_out[t][e] += ((float (*)[embedding_dim])mha_att)[t][kqh] *
-                           util_bf16_to_f32(mha_out_weight[l][e][kqh]);
-        }
+        mha_out[t][e] =
+            dot(embedding_dim,
+                ((float (*)[embedding_dim])mha_att)[t],
+                mha_out_weight[l][e]);
       }
     }
 
@@ -1095,22 +1220,14 @@ static void transformer_predict_chunk(
     // Feed-forward's fully-connected matmul (a.k.a. gate)
     for (size_t t = 0; t < token_count; t++) {
       for (size_t h = 0; h < hidden_dim; h++) {
-        ffn_fc[t][h] = 0.0f;
-        for (size_t e = 0; e < embedding_dim; e++) {
-          ffn_fc[t][h] +=
-              ffn_norm[t][e] * util_bf16_to_f32(ffn_fc_weight[l][h][e]);
-        }
+        ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
       }
     }
 
     // Feed-forward's up matmul
     for (size_t t = 0; t < token_count; t++) {
       for (size_t h = 0; h < hidden_dim; h++) {
-        ffn_up[t][h] = 0.0f;
-        for (size_t e = 0; e < embedding_dim; e++) {
-          ffn_up[t][h] +=
-              ffn_norm[t][e] * util_bf16_to_f32(ffn_up_weight[l][h][e]);
-        }
+        ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
       }
     }
 
@@ -1127,11 +1244,7 @@ static void transformer_predict_chunk(
     // Final matmul to get the output of the feed-forward network
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
-        ffn_out[t][e] = 0.0f;
-        for (size_t h = 0; h < hidden_dim; h++) {
-          ffn_out[t][e] +=
-              ffn_fc[t][h] * util_bf16_to_f32(ffn_out_weight[l][e][h]);
-        }
+        ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
       }
     }
 
@@ -1175,11 +1288,10 @@ static void transformer_predict_chunk(
   // Classifier into logits
   for (size_t l = 0; l < logits_count; l++) {
     for (size_t v = 0; v < vocabulary_len; v++) {
-      logits[l][v] = 0.0f;
-      for (size_t e = 0; e < embedding_dim; e++) {
-        logits[l][v] += embedding[l + token_count - logits_count][e] *
-                        util_bf16_to_f32(out_weight[v][e]);
-      }
+      logits[l][v] =
+          dot(embedding_dim,
+              embedding[l + token_count - logits_count],
+              out_weight[v]);
     }
   }
 }

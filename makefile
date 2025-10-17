@@ -6,7 +6,8 @@ YACC    = yacc
 # Flags
 INC_DIR = include
 WFLAGS  = -Wall -Wextra -Wpedantic -Wno-unknown-pragmas
-CFLAGS  = -O2 $(WFLAGS) -I$(INC_DIR)
+OFLAGS  = -O2 -march=native
+CFLAGS  = $(OFLAGS) $(WFLAGS) -I$(INC_DIR)
 LDFLAGS = -lm
 EXEC    = strasgpt
 
@@ -85,6 +86,6 @@ else
 BREW_LIBOMP_LD_FLAGS = -fopenmp
 endif
 parallel: CC = mpicc
-parallel: CFLAGS = -O2 $(WFLAGS) -fopenmp -I$(INC_DIR) -DPARALLEL=1
+parallel: CFLAGS = $(OFLAGS) -fopenmp $(WFLAGS) -I$(INC_DIR) -DPARALLEL=1
 parallel: LDFLAGS = $(BREW_LIBOMP_LD_FLAGS) -lm
 parallel: all

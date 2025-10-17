@@ -24,9 +24,10 @@
         exit(EXIT_FAILURE); \
     } while(0)
 
-#define UTIL_GIGA     (1024 * 1024 * 1024)
-#define UTIL_MIN(a,b) (((a)<(b))?(a):(b))
-#define UTIL_MAX(a,b) (((a)>(b))?(a):(b))
+#define UTIL_ALIGNMENT 32
+#define UTIL_GIGA      (1024 * 1024 * 1024)
+#define UTIL_MIN(a,b)  (((a)<(b))?(a):(b))
+#define UTIL_MAX(a,b)  (((a)>(b))?(a):(b))
 
 static inline float util_bf16_to_f32(uint16_t w) {
   union {
