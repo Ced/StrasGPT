@@ -31,6 +31,8 @@ extern int json_scanner_lex_destroy(void);
 // Global variables for MPI rank/size we may declare extern in other files
 int mpi_rank, mpi_size;
 
+extern unsigned long long total_more, total_zero;
+
 // Return time in milliseconds, for benchmarking the model speed
 static long time_in_ms(void) {
   struct timespec time;
@@ -88,10 +90,19 @@ int main(int argc, char* argv[]) {
 
   // - Safetensors model files
   safetensors_t* safetensors = safetensors_read(options);
-  #ifdef DEBUG
-  safetensors_print(stderr, safetensors);
-  fprintf(stderr, "\n");
-  #endif
+  if (options->show_safetensors) {
+    safetensors_print(stderr, safetensors);
+    safetensors_free(safetensors);
+    options_free(options);
+    return EXIT_SUCCESS;
+  }
+
+  if (options->show_model) {
+    safetensors_print_model_infos(stderr, safetensors);
+    safetensors_free(safetensors);
+    options_free(options);
+    return EXIT_SUCCESS;
+  }
 
   // - Tokenizer
   tokenizer_t* tokenizer = tokenizer_read(options);
@@ -238,6 +249,5 @@ int main(int argc, char* argv[]) {
   if (MPI_Finalize() != MPI_SUCCESS) {
     UTIL_DIE("MPI_Finalize failed");
   }
-
   return EXIT_SUCCESS;
 }

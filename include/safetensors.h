@@ -1,6 +1,7 @@
 #ifndef SAFETENSORS_H
 # define SAFETENSORS_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 
@@ -68,9 +69,11 @@ typedef struct safetensors{
 safetensors_t* safetensors_malloc(void);
 void safetensors_free(safetensors_t* safetensors);
 void safetensors_print(FILE* f, const safetensors_t* safetensors);
+void safetensors_print_model_infos(FILE* f, const safetensors_t* s);
 safetensors_t* safetensors_read(struct options* options);
 safetensors_type_t safetensors_type_from_string(const char *s);
 void safetensors_file_lookup(safetensors_t* s, char* path, char* file);
 size_t safetensors_sizeof(safetensors_type_t type);
+bool safetensors_aliased_out_weight(const safetensors_t* safetensors);
 
 #endif // SAFETENSORS_H

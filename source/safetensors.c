@@ -138,6 +138,178 @@ void safetensors_print(FILE* f, const safetensors_t* safetensors) {
   }
 }
 
+// Print a safetensors_t structure
+void safetensors_print_model_infos(FILE* f, const safetensors_t* s) {
+  if (!s) {
+    fprintf(f, "model: NULL\n");
+    return;
+  }
+
+  size_t head_dim = s->embedding_dim / s->q_head_count;
+  size_t q_head_per_kv_head_count = s->q_head_count / s->kv_head_count;
+  size_t qkv_weight_dim = head_dim * s->embedding_dim;
+  bool aliased_out_weight = safetensors_aliased_out_weight(s);
+
+  // Print files
+  fprintf(f, "Model:\n");
+  fprintf(f, "- Configuration:\n");
+  fprintf(f, "--- embedding_dim:            %zu\n", s->embedding_dim);
+  fprintf(f, "--- head_dim:                 %zu\n", head_dim);
+  fprintf(f, "--- hidden_dim:               %zu\n", s->hidden_dim);
+  fprintf(f, "--- layer_count:              %zu\n", s->layer_count);
+  fprintf(f, "--- q_head_count:             %zu\n", s->q_head_count);
+  fprintf(f, "--- kv_head_count:            %zu\n", s->kv_head_count);
+  fprintf(f, "--- q_head_per_kv_head_count: %zu\n", q_head_per_kv_head_count);
+  fprintf(f, "--- vocabulary_len:           %zu\n", s->vocabulary_len);
+  fprintf(f, "--- context_len:              %zu\n", s->context_len);
+
+  size_t embedding_len = s->vocabulary_len * s->embedding_dim;
+  size_t mha_norm_len = s->layer_count * s->embedding_dim;
+  size_t mha_q_len = s->layer_count * s->q_head_count * qkv_weight_dim;
+  size_t mha_kv_len = s->layer_count * s->kv_head_count * qkv_weight_dim;
+  size_t mha_out_len = s->layer_count * s->embedding_dim * s->embedding_dim;
+  size_t ffn_norm_len = s->layer_count * s->embedding_dim;
+  size_t ffn_fc_len = s->layer_count * s->embedding_dim * s->hidden_dim;
+  size_t ffn_up_len = s->layer_count * s->embedding_dim * s->hidden_dim;
+  size_t ffn_out_len = s->layer_count * s->hidden_dim * s->embedding_dim;
+  size_t out_norm_len = s->embedding_dim;
+  size_t out_len = s->vocabulary_len * s->embedding_dim;
+
+  double gb = 1024 * 1024 * 1024;
+  double embedding_gb = (embedding_len * sizeof(uint16_t)) / gb;
+  double mha_norm_gb = (mha_norm_len * sizeof(uint16_t)) / gb;
+  double mha_q_gb = (mha_q_len * sizeof(uint16_t)) / gb;
+  double mha_k_gb = (mha_kv_len * sizeof(uint16_t)) / gb;
+  double mha_v_gb = (mha_kv_len * sizeof(uint16_t)) / gb;
+  double mha_out_gb = (mha_out_len * sizeof(uint16_t)) / gb;
+  double ffn_norm_gb = (ffn_norm_len * sizeof(uint16_t)) / gb;
+  double ffn_fc_gb = (ffn_fc_len * sizeof(uint16_t)) / gb;
+  double ffn_up_gb = (ffn_up_len * sizeof(uint16_t)) / gb;
+  double ffn_out_gb = (ffn_out_len * sizeof(uint16_t)) / gb;
+  double out_norm_gb = (out_norm_len * sizeof(uint16_t)) / gb;
+  double out_gb = aliased_out_weight ? 0 : (out_len * sizeof(uint16_t)) / gb;
+
+  double total_gb = embedding_gb + mha_norm_gb + mha_q_gb + mha_k_gb +
+                    mha_v_gb + mha_out_gb + ffn_norm_gb + ffn_fc_gb +
+                    ffn_up_gb + ffn_out_gb + out_norm_gb + out_gb;
+
+  double non_layer_gb = embedding_gb + out_norm_gb + out_gb;
+  double per_layer_gb = total_gb / s->layer_count;
+
+  fprintf(
+      f,
+      "- Tensors (total %.2f GB, non-layer %.2f GB, per-layer %.2f GB):\n",
+      total_gb,
+      non_layer_gb,
+      per_layer_gb
+  );
+  fprintf(
+      f,
+      "--- embedding (%6.4f GB) [vocabulary_len=%zu][embedding_dim=%zu]\n",
+      embedding_gb,
+      s->vocabulary_len,
+      s->embedding_dim
+  );
+  fprintf(
+      f,
+      "---  mha_norm (%6.4f GB) [layer_count=%zu][embedding_dim=%zu]\n",
+      mha_norm_gb,
+      s->layer_count,
+      s->embedding_dim
+  );
+  fprintf(
+      f,
+      "---     mha_q (%6.4f GB) [layer_count=%zu][kv_head_count=%zu]"
+      "[q_head_per_kv_head_count=%zu][head_dim=%zu][embedding_dim=%zu]\n",
+      mha_q_gb,
+      s->layer_count,
+      s->kv_head_count,
+      q_head_per_kv_head_count,
+      head_dim,
+      s->embedding_dim
+  );
+  fprintf(
+      f,
+      "---     mha_k (%6.4f GB) [layer_count=%zu][kv_head_count=%zu]"
+      "[head_dim=%zu][embedding_dim=%zu]\n",
+      mha_k_gb,
+      s->layer_count,
+      s->kv_head_count,
+      head_dim,
+      s->embedding_dim
+  );
+  fprintf(
+      f,
+      "---     mha_v (%6.4f GB) [layer_count=%zu][kv_head_count=%zu]"
+      "[head_dim=%zu][embedding_dim=%zu]\n",
+      mha_v_gb,
+      s->layer_count,
+      s->kv_head_count,
+      head_dim,
+      s->embedding_dim
+  );
+  fprintf(
+      f,
+      "---   mha_out (%6.4f GB) [layer_count=%zu][embedding_dim=%zu]"
+      "[embedding_dim=%zu]\n",
+      mha_out_gb,
+      s->layer_count,
+      s->embedding_dim,
+      s->embedding_dim
+  );
+  fprintf(
+      f,
+      "---  ffn_norm (%6.4f GB) [layer_count=%zu][embedding_dim=%zu]\n",
+      ffn_norm_gb,
+      s->layer_count,
+      s->embedding_dim
+  );
+  fprintf(
+      f,
+      "---    ffn_fc (%6.4f GB) [layer_count=%zu][hidden_dim=%zu]"
+      "[embedding_dim=%zu]\n",
+      ffn_fc_gb,
+      s->layer_count,
+      s->hidden_dim,
+      s->embedding_dim
+  );
+  fprintf(
+      f,
+      "---    ffn_up (%6.4f GB) [layer_count=%zu][hidden_dim=%zu]"
+      "[embedding_dim=%zu]\n",
+      ffn_up_gb,
+      s->layer_count,
+      s->hidden_dim,
+      s->embedding_dim
+  );
+  fprintf(
+      f,
+      "---   ffn_out (%6.4f GB) [layer_count=%zu][embedding_dim=%zu]"
+      "[hidden_dim=%zu]\n",
+      ffn_out_gb,
+      s->layer_count,
+      s->embedding_dim,
+      s->hidden_dim
+  );
+  fprintf(
+      f,
+      "---  out_norm (%6.4f GB) [embedding_dim=%zu]\n",
+      out_norm_gb,
+      s->embedding_dim
+  );
+  if (aliased_out_weight) {
+    fprintf(f, "---       out (%6.4f GB): alias to embedding\n", out_gb);
+  } else {
+    fprintf(
+        f,
+        "---       out (%6.4f GB) [vocabulary_len=%zu][embedding_dim=%zu]\n",
+        out_gb,
+        s->vocabulary_len,
+        s->embedding_dim
+    );
+  }
+}
+
 // Read safetensors by parsing safetensor files in the model directory
 safetensors_t* parser_parse_safetensors(const char* path);
 safetensors_t* safetensors_read(options_t* options) {
@@ -197,4 +369,16 @@ size_t safetensors_sizeof(safetensors_type_t type) {
       UTIL_DIE("unknown safetensors type");
   }
   return 0;
+}
+
+// Return true if the output weight is aliased to the embedding weight
+// If the output weight is not found, we assume it's aliased
+bool safetensors_aliased_out_weight(const safetensors_t* safetensors) {
+  for (size_t i = 0; i < safetensors->tensor_count; i++) {
+    const safetensors_tensor_t* t = &safetensors->tensor[i];
+    if (strcmp(t->name, SAFETENSORS_PATTERN_OUT_WEIGHT) == 0) {
+      return false; // Found the output weight, not aliased
+    }
+  }
+  return true;
 }

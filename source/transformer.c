@@ -13,18 +13,6 @@
 #include <fcntl.h>      // for open() and O_* flags
 #include <unistd.h>     // for close()
 
-// Return true if the output weight is aliased to the embedding weight
-// If the output weight is not found, we assume it's aliased
-static bool aliased_out_weight(const safetensors_t* safetensors) {
-  for (size_t i = 0; i < safetensors->tensor_count; i++) {
-    const safetensors_tensor_t* t = &safetensors->tensor[i];
-    if (strcmp(t->name, SAFETENSORS_PATTERN_OUT_WEIGHT) == 0) {
-      return false; // Found the output weight, not aliased
-    }
-  }
-  return true;
-}
-
 // Create a transformer_configuration_t structure from a safetensors_t
 static transformer_configuration_t* configuration_from_safetensors(
     safetensors_t* safetensors
@@ -40,7 +28,7 @@ static transformer_configuration_t* configuration_from_safetensors(
   config->kv_head_count = safetensors->kv_head_count;
   config->vocabulary_len = safetensors->vocabulary_len;
   config->context_len = safetensors->context_len;
-  config->aliased_out_weight = aliased_out_weight(safetensors);
+  config->aliased_out_weight = safetensors_aliased_out_weight(safetensors);
   return config;
 }
 
@@ -592,7 +580,7 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   w->ffn_up_weight = aligned_alloc(UTIL_ALIGNMENT, fn_up_size);
   w->ffn_out_weight = aligned_alloc(UTIL_ALIGNMENT, ffn_out_size);
   w->out_norm_weight = aligned_alloc(UTIL_ALIGNMENT, out_norm_size);
-  bool is_out_weigth_aliased = aliased_out_weight(t);
+  bool is_out_weigth_aliased = safetensors_aliased_out_weight(t);
   if (is_out_weigth_aliased) {
     w->out_weight = w->embedding_weight;
   } else {

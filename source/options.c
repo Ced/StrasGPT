@@ -21,6 +21,8 @@ options_t* options_malloc(void) {
   options->top_p = OPTIONS_DEFAULT_TOP_P;
   options->temperature = OPTIONS_DEFAULT_TEMPERATURE;
   options->seed_is_set = false;
+  options->show_model = false;
+  options->show_safetensors = false;
   return options;
 }
 
@@ -39,20 +41,28 @@ void options_print(FILE* f, const options_t* options) {
   // Print options
   fprintf(f, "Options:\n");
   if (options->use_prompt_file) {
-    fprintf(f, "- prompt (file):   %s\n", options->prompt_file);
+    fprintf(f, "- prompt (file):    %s\n", options->prompt_file);
   } else {
-    fprintf(f, "- prompt (string): %s\n", options->prompt_string);
+    fprintf(f, "- prompt (string):  %s\n", options->prompt_string);
   }
-  fprintf(f, "- model_dir:       %s\n", options->model_dir);
-  fprintf(f, "- step_count:      %zu\n", options->step_count);
-  fprintf(f, "- thread_count:    %zu\n", options->thread_count);
-  fprintf(f, "- top_p:           %.3f\n", options->top_p);
-  fprintf(f, "- temperature:     %.3f\n", options->temperature);
+  fprintf(f, "- model_dir:        %s\n", options->model_dir);
+  fprintf(f, "- step_count:       %zu\n", options->step_count);
+  fprintf(f, "- thread_count:     %zu\n", options->thread_count);
+  fprintf(f, "- top_p:            %.3f\n", options->top_p);
+  fprintf(f, "- temperature:      %.3f\n", options->temperature);
   if (options->seed_is_set) {
-    fprintf(f, "- seed:            %llu\n", options->seed);
+    fprintf(f, "- seed:             %llu\n", options->seed);
   } else {
-    fprintf(f, "- seed:            (not set)\n");
+    fprintf(f, "- seed:             (not set)\n");
   }
+  fprintf(
+      f, "- show_model:       %s\n", options->show_model ? "true" : "false"
+  );
+  fprintf(
+      f,
+      "- show_safetensors: %s\n",
+      options->show_safetensors ? "true" : "false"
+  );
 }
 
 void option_usage(char* argv[], int status) {
@@ -61,10 +71,12 @@ void option_usage(char* argv[], int status) {
   fprintf(stderr, "Options:\n");
   fprintf(stderr, "  -f <path>       read prompt from file\n");
   fprintf(stderr, "  -h, --help      print usage and exit\n");
-  fprintf(stderr, "  -m <dir>        model directory (default .)\n");
+  fprintf(stderr, "  -m <dir>        model directory (default ./)\n");
   fprintf(stderr, "  -n <int>        num of tokens to predict (default 256)\n");
   fprintf(stderr, "  -p <string>     input prompt\n");
   fprintf(stderr, "  -s <int>        random seed (default time(NULL))\n");
+  fprintf(stderr, "  --show-model    show model infos and exit\n");
+  fprintf(stderr, "  --show-safetensors show safetensors infos and exit\n");
   fprintf(stderr, "  -t <int>        set the number of threads (default 1)\n");
   fprintf(stderr, "  --temp <float>  temperature in [0, inf] (default 1.0)\n");
   fprintf(stderr, "  --top-p <float> top-p sampling in [0, 1] (default 0.9)\n");
@@ -122,6 +134,10 @@ options_t* options_read(int argc, char* argv[]) {
         options_free(options);
         option_usage(argv, EXIT_FAILURE);
       }
+    } else if (strcmp(argv[i], "--show-model") == 0) {
+      options->show_model = true;
+    } else if (strcmp(argv[i], "--show-safetensors") == 0) {
+      options->show_safetensors = true;
     } else if (strcmp(argv[i], "-t") == 0) {
       if (i + 1 < arg_count) {
         int thread_count = strtoll(argv[i + 1], NULL, 10);

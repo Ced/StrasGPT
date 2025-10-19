@@ -24,6 +24,8 @@ typedef struct options {
   float temperature;
   bool seed_is_set;
   unsigned long long seed;
+  bool show_model;
+  bool show_safetensors;
 } options_t;
 
 options_t* options_malloc(void);
