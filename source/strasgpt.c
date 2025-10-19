@@ -18,12 +18,13 @@
 #else
 #define MPI_SUCCESS 0
 #define MPI_COMM_WORLD 0
-#define omp_get_thread_num()  0
-#define omp_get_num_threads() 1
-#define MPI_Init(a, b)        MPI_SUCCESS
-#define MPI_Comm_rank(a, b)   (*(b) = 0, MPI_SUCCESS)
-#define MPI_Comm_size(a, b)   (*(b) = 1, MPI_SUCCESS)
-#define MPI_Finalize()        MPI_SUCCESS
+#define omp_get_thread_num()   0
+#define omp_get_num_threads()  1
+#define omp_set_num_threads(a)
+#define MPI_Init(a, b)         MPI_SUCCESS
+#define MPI_Comm_rank(a, b)    (*(b) = 0, MPI_SUCCESS)
+#define MPI_Comm_size(a, b)    (*(b) = 1, MPI_SUCCESS)
+#define MPI_Finalize()         MPI_SUCCESS
 #endif
 
 extern int json_scanner_lex_destroy(void);
@@ -57,6 +58,12 @@ static double peak_rss_gb(void) {
 }
 
 int main(int argc, char* argv[]) {
+  // Prepare all the components needed for text generation:
+  // - Options from command line arguments
+  options_t* options = options_read(argc, argv);
+  options_print(stderr, options);
+  fprintf(stderr, "\n");
+
   // Let all processes and threads print their IDs
   if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
     UTIL_DIE("MPI_Init failed");
@@ -67,6 +74,10 @@ int main(int argc, char* argv[]) {
   if (MPI_Comm_size(MPI_COMM_WORLD, &mpi_size) != MPI_SUCCESS) {
     UTIL_DIE("MPI_Comm_size failed");
   }
+
+  // Set OpenMP parameters
+  setenv("OMP_WAIT_POLICY", "ACTIVE", 1);
+  omp_set_num_threads(options->thread_count);
 
   #pragma omp parallel
   fprintf(
@@ -81,12 +92,6 @@ int main(int argc, char* argv[]) {
   if (mpi_rank == 0) {
     fprintf(stderr, "\n");
   }
-
-  // Prepare all the components needed for text generation:
-  // - Options from command line arguments
-  options_t* options = options_read(argc, argv);
-  options_print(stderr, options);
-  fprintf(stderr, "\n");
 
   // - Safetensors model files
   safetensors_t* safetensors = safetensors_read(options);

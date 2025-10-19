@@ -136,8 +136,10 @@ options_t* options_read(int argc, char* argv[]) {
       }
     } else if (strcmp(argv[i], "--show-model") == 0) {
       options->show_model = true;
+      i--;
     } else if (strcmp(argv[i], "--show-safetensors") == 0) {
       options->show_safetensors = true;
+      i--;
     } else if (strcmp(argv[i], "-t") == 0) {
       if (i + 1 < arg_count) {
         int thread_count = strtoll(argv[i + 1], NULL, 10);
