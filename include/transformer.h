@@ -10,12 +10,14 @@ struct safetensors;
 
 typedef struct transformer_configuration {
   size_t embedding_dim;    // Token representation (embedding) dimension
+  size_t head_dim;         // Dimensionality of each individual attention head
   size_t hidden_dim;       // Intermediate representation dimension in the FFN
   size_t layer_count;      // Number of decoder layers
   size_t q_head_count;     // Number of query heads
   size_t kv_head_count;    // Number of key/value heads
   size_t vocabulary_len;   // Vocabulary size
   size_t context_len;      // Maximum sequence length
+  float  rope_theta;       // RoPE base frequency
   bool aliased_out_weight; // True if out_weight is aliased to embedding_weight
 } transformer_configuration_t;
 
@@ -31,7 +33,8 @@ typedef struct transformer_weights {
                               //  head_dim][embedding_dim]
   uint16_t* mha_v_weight;     // [layer_count][kv_head_count][
                               //  head_dim][embedding_dim]
-  uint16_t* mha_out_weight;   // [layer_count][embedding_dim][embedding_dim]
+  uint16_t* mha_out_weight;   // [layer_count][embedding_dim][
+                              //  q_head_count * head_dim]
   // - Feed-forward network
   uint16_t* ffn_norm_weight;  // [layer_count][embedding_dim]
   uint16_t* ffn_fc_weight;    // [layer_count][embedding_dim][hidden_dim]
@@ -51,7 +54,8 @@ typedef struct transformer_state {
   float* mha_score;    // [kv_head_count][q_head_per_kv_head_count][
                        //  chunk_len][context_len]
   float* mha_att;      // [chunk_len][kv_head_count][q_head_per_kv_head_count][
-                       //  head_dim] also seen as [chunk_len][embedding_dim]
+                       //  head_dim]
+                       // also sees as [chunk_len][q_head_count * head_dim]
   float* mha_out;      // [chunk_len][embedding_dim]
   float* ffn_norm;     // [chunk_len][embedding_dim]
   float* ffn_fc;       // [chunk_len][hidden_dim]

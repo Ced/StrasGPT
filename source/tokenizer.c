@@ -34,6 +34,9 @@ void tokenizer_print(FILE* f, const tokenizer_t* tokenizer) {
   }
 
   fprintf(f, "Tokenizer:\n");
+  fprintf(f, "- Special tokens:\n");
+  fprintf(f, "--- bos_token_id: %d\n", tokenizer->bos_token_id);
+  fprintf(f, "--- eos_token_id: %d\n", tokenizer->eos_token_id);
 
   // Print token strings (only first and last TOKENIZER_MAX_PRINT)
   size_t sample_count = TOKENIZER_MAX_PRINT;
@@ -176,9 +179,9 @@ void tokenizer_print_token_string(FILE* f, char* token_string) {
 // Decode a token into a string, taking care of some special tokens and raw
 // byte tokens
 char* tokenizer_decode(tokenizer_t* t, int token) {
-  if (token == TOKENIZER_TOKEN_BOS) {
+  if (token == t->bos_token_id) {
     return TOKENIZER_STRING_TOKEN_BOS;
-  } else if (token == TOKENIZER_TOKEN_EOS) {
+  } else if (token == t->eos_token_id) {
     return TOKENIZER_STRING_TOKEN_EOS;
   }
 
@@ -245,7 +248,7 @@ void tokenizer_tokenize(
 
   // Add optional BOS token, if desired
   if (bos) {
-    token[(*token_count)++] = TOKENIZER_TOKEN_BOS;
+    token[(*token_count)++] = t->bos_token_id;
   }
 
   // add_dummy_prefix is true by default
@@ -383,7 +386,7 @@ void tokenizer_tokenize(
 
   // Add optional EOS token, if desired
   if (eos) {
-    token[(*token_count)++] = TOKENIZER_TOKEN_EOS;
+    token[(*token_count)++] = t->eos_token_id;
   }
 
   free(str_buffer);

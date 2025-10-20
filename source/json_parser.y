@@ -9,11 +9,13 @@
   int yylex(void);
   int json_scanner_lex(void);
   int json_scanner_restart(FILE*);
+  void json_scanner_reset(void);
   void json_scanner_enter_kw_as_string_mode(void);
   void json_scanner_leave_kw_as_string_mode(void);
   safetensors_t* parser_parse_safetensors(const char*);
   tokenizer_t* parser_parse_tokenizer(const char*);
   extern FILE* json_scanner_in;
+  extern size_t json_scanner_line_count;
 
   // Parser state
   enum {
@@ -46,8 +48,9 @@
 %token <number> NUMBER
 %token <boolean> BOOLEAN
 %token NULL_ TYPE SHAPE OFFSET METADATA WEIGHT_MAP
-%token EMBEDDING_DIM HIDDEN_DIM LAYER_COUNT Q_HEAD_COUNT KV_HEAD_COUNT
-%token VOCABULARY_LEN CONTEXT_LEN MODEL VOCAB
+%token BOS_TOKEN_ID EOS_TOKEN_ID
+%token EMBEDDING_DIM HEAD_DIM HIDDEN_DIM LAYER_COUNT Q_HEAD_COUNT KV_HEAD_COUNT
+%token VOCABULARY_LEN CONTEXT_LEN ROPE_THETA MODEL VOCAB
 %token MODE_CONFIG MODE_INDEX MODE_SAFETENSORS MODE_TOKENIZER
 %start entry
 
@@ -75,13 +78,37 @@ config_member_list
   ;
 
 config_member
-  : EMBEDDING_DIM ':' NUMBER
+  : BOS_TOKEN_ID ':' NUMBER
+    {
+      if (!$3.is_int) {
+        yyerror("non integer BOS token id");
+        YYABORT;
+      }
+      parser_safetensors->bos_token_id = (int)$3.ival;
+    }
+  | EOS_TOKEN_ID ':' NUMBER
+    {
+      if (!$3.is_int) {
+        yyerror("non integer EOS token id");
+        YYABORT;
+      }
+      parser_safetensors->eos_token_id = (int)$3.ival;
+    }
+  | EMBEDDING_DIM ':' NUMBER
     {
       if (!$3.is_int) {
         yyerror("non integer embedding_dim value");
         YYABORT;
       }
       parser_safetensors->embedding_dim = $3.ival;
+    }
+  | HEAD_DIM ':' NUMBER
+    {
+      if (!$3.is_int) {
+        yyerror("non integer head_dim value");
+        YYABORT;
+      }
+      parser_safetensors->head_dim = $3.ival;
     }
   | HIDDEN_DIM ':' NUMBER
     {
@@ -130,6 +157,10 @@ config_member
         YYABORT;
       }
       parser_safetensors->context_len = $3.ival;
+    }
+  | ROPE_THETA ':' NUMBER
+    {
+      parser_safetensors->rope_theta = $3.fval;
     }
   | STRING ':' json_value
     {
@@ -308,9 +339,15 @@ tokenizer_model_member
       json_scanner_leave_kw_as_string_mode();
     }
     '}'
-  | STRING ':' json_value
+  | STRING ':'
+    {
+      // See above
+      json_scanner_enter_kw_as_string_mode();
+    }
+    json_value
     {
       free($1);
+      json_scanner_leave_kw_as_string_mode();
     }
   ;
 
@@ -370,7 +407,11 @@ json_value
 
 // Error handling function
 void yyerror(char* err) {
-  UTIL_ERROR(err);
+  char msg[SAFETENSORS_MAX_STRING];
+  snprintf(
+    msg, SAFETENSORS_MAX_STRING, "line %zu: %s", json_scanner_line_count, err
+  );
+  UTIL_ERROR(msg);
 }
 
 // If parsing is not started yet, return the appropriate mode token,
@@ -421,6 +462,7 @@ safetensors_t* parser_parse_safetensors(const char* path) {
     exit(EXIT_FAILURE);
   }
   parser_mode = PARSER_MODE_CONFIG;
+  json_scanner_reset();
   json_scanner_restart(json_scanner_in);
   yyparse();
   fclose(json_scanner_in);
@@ -446,6 +488,7 @@ safetensors_t* parser_parse_safetensors(const char* path) {
   } else {
     parser_mode = PARSER_MODE_INDEX;
     snprintf(parser_path, sizeof(parser_path), "%s", path);
+    json_scanner_reset();
     json_scanner_restart(json_scanner_in);
     yyparse();
     fclose(json_scanner_in);
@@ -480,12 +523,20 @@ safetensors_t* parser_parse_safetensors(const char* path) {
     // Then read JSON header
     parser_mode = PARSER_MODE_SAFETENSORS;
     parser_header_len = (size_t)header_len;
+    json_scanner_reset();
     json_scanner_restart(json_scanner_in);
     yyparse();
     fclose(json_scanner_in);
     #ifdef DEBUG
     fprintf(stderr, "Done\n");
     #endif
+  }
+
+  // In some config files, head_dim is not specified. In that case,
+  // default value is embedding_dim / q_head_count
+  if (parser_safetensors->head_dim == 0) {
+    parser_safetensors->head_dim =
+        parser_safetensors->embedding_dim / parser_safetensors->q_head_count;
   }
 
   return parser_safetensors;
@@ -506,6 +557,7 @@ tokenizer_t* parser_parse_tokenizer(const char* path) {
     UTIL_DIE("Failed to open tokenizer file");
   }
   parser_mode = PARSER_MODE_TOKENIZER;
+  json_scanner_reset();
   json_scanner_restart(json_scanner_in);
   yyparse();
   fclose(json_scanner_in);

@@ -24,7 +24,7 @@ struct options;
 #define SAFETENSORS_PATTERN_OUT_NORM_WEIGHT  "model.norm.weight"
 #define SAFETENSORS_PATTERN_OUT_WEIGHT       "lm_head.weight"
 
-#define SAFETENSORS_MAX_FILE_COUNT   8
+#define SAFETENSORS_MAX_FILE_COUNT   64
 #define SAFETENSORS_MAX_DIM_COUNT    4
 #define SAFETENSORS_MAX_TENSOR_COUNT 65536
 #define SAFETENSORS_MAX_STRING       1024
@@ -50,12 +50,18 @@ typedef struct safetensors_tensor_t {
 typedef struct safetensors{
   // Model configuration
   size_t embedding_dim;  // Token representation (embedding) dimension
+  size_t head_dim;       // Dimensionality of each individual attention head
   size_t hidden_dim;     // Intermediate representation dimension in the FFN
   size_t layer_count;    // Number of decoder layers
   size_t q_head_count;   // Number of query heads
   size_t kv_head_count;  // Number of key/value heads
   size_t vocabulary_len; // Vocabulary size
   size_t context_len;    // Maximum sequence length
+  float  rope_theta;     // RoPE base frequency
+
+  // Special tokens from the configuration file
+  int bos_token_id;      // Beginning of string token id
+  int eos_token_id;      // End of string token id
 
   // File names where tensors are stored
   size_t file_count;

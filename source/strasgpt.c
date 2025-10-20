@@ -16,8 +16,8 @@
 #include <omp.h>
 #include <mpi.h>
 #else
-#define MPI_SUCCESS 0
-#define MPI_COMM_WORLD 0
+#define MPI_SUCCESS            0
+#define MPI_COMM_WORLD         0
 #define omp_get_thread_num()   0
 #define omp_get_num_threads()  1
 #define omp_set_num_threads(a)
@@ -109,8 +109,10 @@ int main(int argc, char* argv[]) {
     return EXIT_SUCCESS;
   }
 
-  // - Tokenizer
+  // - Tokenizer (ugly getting EOS/BOS from safetensors at the moment)
   tokenizer_t* tokenizer = tokenizer_read(options);
+  tokenizer->bos_token_id = safetensors->bos_token_id;
+  tokenizer->eos_token_id = safetensors->eos_token_id;
   tokenizer_print(stderr, tokenizer);
   fprintf(stderr, "\n");
 
@@ -206,7 +208,7 @@ int main(int argc, char* argv[]) {
 
     predicted_token = sampler_sample(sampler, logits);
     generated_count++;
-    if (predicted_token != TOKENIZER_TOKEN_EOS) {
+    if (predicted_token != tokenizer->eos_token_id) {
       predicted_string = tokenizer_decode(tokenizer, predicted_token);
       tokenizer_print_token_string(stdout, predicted_string);
     } else {

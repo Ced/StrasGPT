@@ -11,8 +11,6 @@ struct options;
 #define TOKENIZER_MAX_PRINT        4
 #define TOKENIZER_MAX_TOKEN_STRING 131072 // Enough for TikToken
 #define TOKENIZER_MAX_BYTE_STRING  512    // Must be multiple of 2
-#define TOKENIZER_TOKEN_BOS        128000 // Beginning of sequence token
-#define TOKENIZER_TOKEN_EOS        128001 // End of sequence token
 #define TOKENIZER_STRING_TOKEN_BOS "<|begin_of_text|>"
 #define TOKENIZER_STRING_TOKEN_EOS "<|end_of_text|>"
 
@@ -28,6 +26,10 @@ typedef struct tokenizer {
   tokenizer_index_t sorted_token_string[TOKENIZER_MAX_TOKEN_STRING];
   size_t max_token_string_len;
   unsigned char byte_string[TOKENIZER_MAX_BYTE_STRING]; // Single-byte strings
+
+  // Special tokens
+  int bos_token_id; // Beginning of string token id
+  int eos_token_id; // End of string token id
 } tokenizer_t;
 
 tokenizer_t* tokenizer_malloc(void);

@@ -22,12 +22,14 @@ static transformer_configuration_t* configuration_from_safetensors(
     UTIL_DIE("failed to malloc for transformer_configuration_t");
   }
   config->embedding_dim = safetensors->embedding_dim;
+  config->head_dim = safetensors->head_dim;
   config->hidden_dim = safetensors->hidden_dim;
   config->layer_count = safetensors->layer_count;
   config->q_head_count = safetensors->q_head_count;
   config->kv_head_count = safetensors->kv_head_count;
   config->vocabulary_len = safetensors->vocabulary_len;
   config->context_len = safetensors->context_len;
+  config->rope_theta = safetensors->rope_theta;
   config->aliased_out_weight = safetensors_aliased_out_weight(safetensors);
   return config;
 }
@@ -40,20 +42,20 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   }
 
   size_t chunk_max_len = TRANSFORMER_CHUNK_MAX_LEN;
-  size_t head_dim = t->embedding_dim / t->q_head_count;
-  size_t kv_dim = head_dim * t->kv_head_count;
+  size_t kv_dim = t->head_dim * t->kv_head_count;
   size_t embedding_len = chunk_max_len * t->embedding_dim;
+  size_t mha_att_len = chunk_max_len * t->q_head_count * t->head_dim;
   size_t hidden_len = chunk_max_len * t->hidden_dim;
   size_t score_len = t->q_head_count * chunk_max_len * t->context_len;
   size_t cache_len = t->context_len * t->layer_count * kv_dim;
   size_t logits_len = chunk_max_len * t->vocabulary_len;
-  size_t rope_len = t->context_len * head_dim;
+  size_t rope_len = t->context_len * t->head_dim;
 
   size_t embedding_size = embedding_len * sizeof(*s->embedding);
   size_t mha_norm_size = embedding_len * sizeof(*s->mha_norm);
   size_t mha_q_size = embedding_len * sizeof(*s->mha_q);
   size_t mha_score_size = score_len * sizeof(*s->mha_score);
-  size_t mha_att_size = embedding_len * sizeof(*s->mha_att);
+  size_t mha_att_size = mha_att_len * sizeof(*s->mha_att);
   size_t mha_out_size = embedding_len * sizeof(*s->mha_out);
   size_t ffn_norm_size = embedding_len * sizeof(*s->ffn_norm);
   size_t ffn_fc_size = hidden_len * sizeof(*s->ffn_fc);
@@ -99,11 +101,11 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
 
   // Initialize RoPE cosine and sine values
   for (size_t i = 0; i < t->context_len; i++) {
-    for (size_t j = 0; j < head_dim; j += 2) {
-      float freq = 1.0f / powf(500000.0f, j / (float)head_dim);
+    for (size_t j = 0; j < t->head_dim; j += 2) {
+      float freq = 1.0f / powf(t->rope_theta, j / (float)t->head_dim);
       float val = i * freq;
-      s->rope_cos_sin[i * head_dim + j] = cosf(val);
-      s->rope_cos_sin[i * head_dim + j + 1] = sinf(val);
+      s->rope_cos_sin[i * t->head_dim + j] = cosf(val);
+      s->rope_cos_sin[i * t->head_dim + j + 1] = sinf(val);
     }
   }
 
@@ -281,8 +283,7 @@ static void load_mha_q_weight(
     size_t index,
     transformer_weights_t* weights
 ) {
-  size_t head_dim = safetensors->embedding_dim / safetensors->q_head_count;
-  size_t qkv_weight_dim = head_dim * safetensors->embedding_dim;
+  size_t qkv_weight_dim = safetensors->head_dim * safetensors->embedding_dim;
   size_t len = safetensors->q_head_count * qkv_weight_dim;
   if (tensor->size != len * sizeof(*weights->mha_q_weight)) {
     UTIL_DIE("unexpected size for mha q weight");
@@ -297,7 +298,7 @@ static void load_mha_q_weight(
 
   // Permute the weight from Hugging Face layout to Meta layout
   permute_hf_to_meta(
-      safetensors->q_head_count * head_dim,
+      safetensors->q_head_count * safetensors->head_dim,
       safetensors->embedding_dim,
       safetensors->q_head_count,
       &weights->mha_q_weight[index * len]
@@ -310,8 +311,7 @@ static void load_mha_k_weight(
     size_t index,
     transformer_weights_t* weights
 ) {
-  size_t head_dim = safetensors->embedding_dim / safetensors->q_head_count;
-  size_t qkv_weight_dim = head_dim * safetensors->embedding_dim;
+  size_t qkv_weight_dim = safetensors->head_dim * safetensors->embedding_dim;
   size_t len = safetensors->kv_head_count * qkv_weight_dim;
   if (tensor->size != len * sizeof(*weights->mha_k_weight)) {
     UTIL_DIE("unexpected size for mha k weight");
@@ -326,7 +326,7 @@ static void load_mha_k_weight(
 
   // Permute the weight from Hugging Face layout to Meta layout
   permute_hf_to_meta(
-      safetensors->kv_head_count * head_dim,
+      safetensors->kv_head_count * safetensors->head_dim,
       safetensors->embedding_dim,
       safetensors->kv_head_count,
       &weights->mha_k_weight[index * len]
@@ -339,8 +339,7 @@ static void load_mha_v_weight(
     size_t index,
     transformer_weights_t* weights
 ) {
-  size_t head_dim = safetensors->embedding_dim / safetensors->q_head_count;
-  size_t qkv_weight_dim = head_dim * safetensors->embedding_dim;
+  size_t qkv_weight_dim = safetensors->head_dim * safetensors->embedding_dim;
   size_t len = safetensors->kv_head_count * qkv_weight_dim;
   if (tensor->size != len * sizeof(*weights->mha_v_weight)) {
     UTIL_DIE("unexpected size for mha v weight");
@@ -360,7 +359,8 @@ static void load_mha_out_weight(
     size_t index,
     transformer_weights_t* weights
 ) {
-  size_t len = safetensors->embedding_dim * safetensors->embedding_dim;
+  size_t mha_out_dim = safetensors->q_head_count * safetensors->head_dim;
+  size_t len = safetensors->embedding_dim * mha_out_dim;
   if (tensor->size != len * sizeof(*weights->mha_out_weight)) {
     UTIL_DIE("unexpected size for mha out weight");
   }
@@ -542,14 +542,14 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
     UTIL_DIE("failed to malloc for transformer_weights_t");
   }
 
-  size_t head_dim = t->embedding_dim / t->q_head_count;
-  size_t qkv_weight_dim = head_dim * t->embedding_dim;
+  size_t qkv_weight_dim = t->head_dim * t->embedding_dim;
 
   size_t embedding_len = t->vocabulary_len * t->embedding_dim;
   size_t mha_norm_len = t->layer_count * t->embedding_dim;
   size_t mha_q_len = t->layer_count * t->q_head_count * qkv_weight_dim;
   size_t mha_kv_len = t->layer_count * t->kv_head_count * qkv_weight_dim;
-  size_t mha_out_len = t->layer_count * t->embedding_dim * t->embedding_dim;
+  size_t mha_out_dim = t->q_head_count * t->head_dim;
+  size_t mha_out_len = t->layer_count * t->embedding_dim * mha_out_dim;
   size_t ffn_norm_len = t->layer_count * t->embedding_dim;
   size_t ffn_fc_len = t->layer_count * t->embedding_dim * t->hidden_dim;
   size_t ffn_up_len = t->layer_count * t->embedding_dim * t->hidden_dim;
@@ -686,23 +686,25 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   fprintf(f, "Transformer:\n");
   fprintf(f, "- Configuration:\n");
   fprintf(f, "--- embedding_dim:      %zu\n", c->embedding_dim);
+  fprintf(f, "--- head_dim:           %zu\n", c->head_dim);
   fprintf(f, "--- hidden_dim:         %zu\n", c->hidden_dim);
   fprintf(f, "--- layer_count:        %zu\n", c->layer_count);
   fprintf(f, "--- q_head_count:       %zu\n", c->q_head_count);
   fprintf(f, "--- kv_head_count:      %zu\n", c->kv_head_count);
   fprintf(f, "--- vocabulary_len:     %zu\n", c->vocabulary_len);
   fprintf(f, "--- context_len:        %zu\n", c->context_len);
+  fprintf(f, "--- rope_theta:         %.1f\n", c->rope_theta);
   char* aliased_out = c->aliased_out_weight ? "true" : "false";
   fprintf(f, "--- aliased_out_weight: %s\n", aliased_out);
 
-  size_t head_dim = c->embedding_dim / c->q_head_count;
-  size_t qkv_weight_dim = head_dim * c->embedding_dim;
+  size_t qkv_weight_dim = c->head_dim * c->embedding_dim;
 
   size_t embedding_len = c->vocabulary_len * c->embedding_dim;
   size_t mha_norm_len = c->layer_count * c->embedding_dim;
   size_t mha_q_len = c->layer_count * c->q_head_count * qkv_weight_dim;
   size_t mha_kv_len = c->layer_count * c->kv_head_count * qkv_weight_dim;
-  size_t mha_out_len = c->layer_count * c->embedding_dim * c->embedding_dim;
+  size_t mha_out_dim = c->q_head_count * c->head_dim;
+  size_t mha_out_len = c->layer_count * c->embedding_dim * mha_out_dim;
   size_t ffn_norm_len = c->layer_count * c->embedding_dim;
   size_t ffn_fc_len = c->layer_count * c->embedding_dim * c->hidden_dim;
   size_t ffn_up_len = c->layer_count * c->embedding_dim * c->hidden_dim;
@@ -1029,7 +1031,8 @@ static void transformer_predict_chunk(
                          [embedding_dim],
     uint16_t mha_v_weight[restrict layer_count][kv_head_count][head_dim]
                          [embedding_dim],
-    uint16_t mha_out_weight[restrict layer_count][embedding_dim][embedding_dim],
+    uint16_t mha_out_weight[restrict layer_count][embedding_dim]
+                           [q_head_count * head_dim],
     uint16_t ffn_norm_weight[restrict layer_count][embedding_dim],
     uint16_t ffn_fc_weight[restrict layer_count][hidden_dim][embedding_dim],
     uint16_t ffn_up_weight[restrict layer_count][hidden_dim][embedding_dim],
@@ -1182,8 +1185,8 @@ static void transformer_predict_chunk(
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         mha_out[t][e] =
-            dot(embedding_dim,
-                ((float (*)[embedding_dim])mha_att)[t],
+            dot(q_head_count * head_dim,
+                ((float (*)[q_head_count * head_dim])mha_att)[t],
                 mha_out_weight[l][e]);
       }
     }
@@ -1246,6 +1249,7 @@ static void transformer_predict_chunk(
     #ifdef DEBUG
     if (l == 0 || l == layer_count - 1) {
       size_t mha_len = token_count * embedding_dim;
+      size_t att_len = token_count * q_head_count * head_dim;
       size_t hidden_len = token_count * hidden_dim;
       size_t score_len = q_head_count * token_count * context_len;
       fprintf(stderr, "Transformer state at layer %zu:\n", l);
@@ -1253,7 +1257,7 @@ static void transformer_predict_chunk(
       util_matrix_summary("-  mha_norm", 1, mha_len, 3, (float*)mha_norm);
       util_matrix_summary("-     mha_q", 1, mha_len, 3, (float*)mha_q);
       util_matrix_summary("- mha_score", 1, score_len, 3, (float*)mha_score);
-      util_matrix_summary("-   mha_att", 1, mha_len, 3, (float*)mha_att);
+      util_matrix_summary("-   mha_att", 1, att_len, 3, (float*)mha_att);
       util_matrix_summary("-   mha_out", 1, mha_len, 3, (float*)mha_out);
       util_matrix_summary("-  ffn_norm", 1, mha_len, 3, (float*)ffn_norm);
       util_matrix_summary("-    ffn_fc", 1, hidden_len, 3, (float*)ffn_fc);
@@ -1313,7 +1317,7 @@ void transformer_predict(
   size_t kv_head_count = c->kv_head_count;
   size_t q_head_per_kv_head_count = q_head_count / kv_head_count;
   size_t embedding_dim = c->embedding_dim;
-  size_t head_dim = embedding_dim / q_head_count;
+  size_t head_dim = c->head_dim;
   size_t hidden_dim = c->hidden_dim;
 
   // Clamp logits_count to available positions
@@ -1369,7 +1373,7 @@ void transformer_predict(
                      [embedding_dim])w->mha_q_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_k_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_v_weight,
-        (uint16_t (*)[embedding_dim][embedding_dim])w->mha_out_weight,
+        (uint16_t (*)[embedding_dim][q_head_count * head_dim])w->mha_out_weight,
         (uint16_t (*)[embedding_dim])w->ffn_norm_weight,
         (uint16_t (*)[hidden_dim][embedding_dim])w->ffn_fc_weight,
         (uint16_t (*)[hidden_dim][embedding_dim])w->ffn_up_weight,
