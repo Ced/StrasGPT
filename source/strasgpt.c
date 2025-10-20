@@ -187,37 +187,53 @@ int main(int argc, char* argv[]) {
   size_t generated_count = 0; // Number of tokens generated so far
   size_t vocabulary_len = 0; // Will be filled by transformer_logits_malloc
   float* logits = transformer_logits_malloc(transformer, 1, &vocabulary_len);
-
-  // First achieve prompt processing (prefill):
-  // - Get the logits (probability distribution) for the next token
+  int predicted_token = 0;
+  char* predicted_string = NULL;
   start = time_in_ms();
-  transformer_predict(transformer, token_count, token, 1, logits);
-  end = time_in_ms();
-  prefill_time = (end - start) / 1000.0;
-  // - Select the next token from the logits
-  int predicted_token = sampler_sample(sampler, logits);
-  // - Decode the token into a string
-  char* predicted_string = tokenizer_decode(tokenizer, predicted_token);
-  // - Print the token string
-  tokenizer_print_token_string(stdout, predicted_string);
-  generated_count++;
 
-  // Then achieve token generation (decode), one by one
-  while (generated_count < options->step_count) {
-    start = time_in_ms();
-    transformer_predict(transformer, 1, &predicted_token, 1, logits);
-    end = time_in_ms();
-    decode_time += (end - start) / 1000.0;
+  #pragma omp parallel
+  {
+    // First achieve prompt processing (prefill):
+    // - Get the logits (probability distribution) for the next token
+    transformer_predict(transformer, token_count, token, 1, logits);
 
-    predicted_token = sampler_sample(sampler, logits);
-    generated_count++;
-    if (predicted_token != tokenizer->eos_token_id) {
+    #pragma omp single
+    {
+      end = time_in_ms();
+      prefill_time = (end - start) / 1000.0;
+      // - Select the next token from the logits
+      predicted_token = sampler_sample(sampler, logits);
+      // - Decode the token into a string
       predicted_string = tokenizer_decode(tokenizer, predicted_token);
+      // - Print the token string
       tokenizer_print_token_string(stdout, predicted_string);
-    } else {
-      // End of string token, stop generating
-      fprintf(stdout, "%s", TOKENIZER_STRING_TOKEN_EOS);
-      break;
+      generated_count++;
+
+      start = time_in_ms();
+    }
+
+    // Then achieve token generation (decode), one by one
+    bool continue_generation = true;
+    while (generated_count < options->step_count && continue_generation) {
+      transformer_predict(transformer, 1, &predicted_token, 1, logits);
+
+      #pragma omp single
+      {
+        end = time_in_ms();
+        decode_time += (end - start) / 1000.0;
+
+        predicted_token = sampler_sample(sampler, logits);
+        generated_count++;
+        if (predicted_token != tokenizer->eos_token_id) {
+          predicted_string = tokenizer_decode(tokenizer, predicted_token);
+          tokenizer_print_token_string(stdout, predicted_string);
+        } else {
+          // End of string token, stop generating (set loop exit condition)
+          fprintf(stdout, "%s", TOKENIZER_STRING_TOKEN_EOS);
+          continue_generation = false;
+        }
+        start = time_in_ms();
+      }
     }
   }
   printf("\n");

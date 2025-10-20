@@ -1064,6 +1064,7 @@ static void transformer_predict_chunk(
   (void)q_head_count; // Unused except in debug mode
 
   // Convert token ids to embedding vector representation
+  #pragma omp single
   for (size_t t = 0; t < token_count; t++) {
     for (size_t e = 0; e < embedding_dim; e++) {
       embedding[t][e] = util_bf16_to_f32(embedding_weight[token[t]][e]);
@@ -1073,6 +1074,7 @@ static void transformer_predict_chunk(
   // Execute decoder layers
   for (size_t l = 0; l < layer_count; l++) {
     // Attention rmsnorm: normalize the embedding vectors for the current layer
+    #pragma omp single
     rmsnorm(
         token_count,
         embedding_dim,
@@ -1082,7 +1084,48 @@ static void transformer_predict_chunk(
         epsilon
     );
 
+
+    // K matmul for all KV-heads, storing in the k_cache
+    #pragma omp for collapse(2) schedule(static) nowait
+    for (size_t k = 0; k < kv_head_count; k++) {
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t h = 0; h < head_dim; h++) {
+          k_cache[l][k][cached_count + t][h] =
+              dot(embedding_dim, mha_norm[t], mha_k_weight[l][k][h]);
+        }
+      }
+    }
+
+    // V matmul for all KV-heads, storing in the v_cache
+    #pragma omp for collapse(2) schedule(static) nowait
+    for (size_t k = 0; k < kv_head_count; k++) {
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t h = 0; h < head_dim; h++) {
+          v_cache[l][k][cached_count + t][h] =
+              dot(embedding_dim, mha_norm[t], mha_v_weight[l][k][h]);
+        }
+      }
+    }
+
+    // RoPE K for all KV-heads: complex-valued rotate K in each head
+    #pragma omp for collapse(2) schedule(static) nowait
+    for (size_t k = 0; k < kv_head_count; k++) {
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t h = 0; h < head_dim; h += 2) {
+          float fr = rope_cos_sin[cached_count + t][h + 0];
+          float fi = rope_cos_sin[cached_count + t][h + 1];
+          float v0 = k_cache[l][k][cached_count + t][h + 0];
+          float v1 = k_cache[l][k][cached_count + t][h + 1];
+          k_cache[l][k][cached_count + t][h + 0] = v0 * fr - v1 * fi;
+          k_cache[l][k][cached_count + t][h + 1] = v0 * fi + v1 * fr;
+        }
+      }
+    }
+
+    #pragma omp barrier
+
     // Q matmul for all Q-heads
+    #pragma omp for collapse(3) schedule(static) nowait
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
         for (size_t t = 0; t < token_count; t++) {
@@ -1094,27 +1137,8 @@ static void transformer_predict_chunk(
       }
     }
 
-    // K matmul for all KV-heads, storing in the k_cache
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h++) {
-          k_cache[l][k][cached_count + t][h] =
-              dot(embedding_dim, mha_norm[t], mha_k_weight[l][k][h]);
-        }
-      }
-    }
-
-    // V matmul for all KV-heads, storing in the v_cache
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h++) {
-          v_cache[l][k][cached_count + t][h] =
-              dot(embedding_dim, mha_norm[t], mha_v_weight[l][k][h]);
-        }
-      }
-    }
-
     // RoPE Q for all Q-heads: complex-valued rotate Q in each head
+    #pragma omp for collapse(3) schedule(static) nowait
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
         for (size_t t = 0; t < token_count; t++) {
@@ -1130,58 +1154,61 @@ static void transformer_predict_chunk(
       }
     }
 
-    // RoPE K for all KV-heads: complex-valued rotate K in each head
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h += 2) {
-          float fr = rope_cos_sin[cached_count + t][h + 0];
-          float fi = rope_cos_sin[cached_count + t][h + 1];
-          float v0 = k_cache[l][k][cached_count + t][h + 0];
-          float v1 = k_cache[l][k][cached_count + t][h + 1];
-          k_cache[l][k][cached_count + t][h + 0] = v0 * fr - v1 * fi;
-          k_cache[l][k][cached_count + t][h + 1] = v0 * fi + v1 * fr;
-        }
-      }
-    }
-
     // Multihead attention. iterate over all Q-heads
+    #pragma omp for collapse(3) schedule(static) nowait
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
         for (size_t t = 0; t < token_count; t++) {
           // Calculate the attention score: QKˆT / sqrt(head_dim)
           // Here we don't use mask but a triangular loop (no compute
           // for future tokens)
-          for (size_t p = 0; p < cached_count + t + 1; p++) {
-            mha_score[k][q][t][p] = 0.0f;
+          for (size_t s = 0; s < cached_count + t + 1; s++) {
+            mha_score[k][q][t][s] = 0.0f;
             for (size_t h = 0; h < head_dim; h++) {
-              mha_score[k][q][t][p] += mha_q[k][q][t][h] * k_cache[l][k][p][h];
+              mha_score[k][q][t][s] +=
+                  mha_q[k][q][t][h] * k_cache[l][k][s][h];
             }
-            mha_score[k][q][t][p] /= sqrtf(head_dim);
+            mha_score[k][q][t][s] /= sqrtf(head_dim);
           }
-        }
 
-        // Softmax the scores to get attention weights
-        softmax(token_count, cached_count, context_len, mha_score[k][q]);
+          // Softmax the scores to get attention weights
+          // - Find max value (for numerical stability)
+          float max = mha_score[k][q][t][0];
+          for (size_t s = 1; s < cached_count + t + 1; s++) {
+            max = (mha_score[k][q][t][s] > max) ? mha_score[k][q][t][s] : max;
+          }
+          // - Exp and sum
+          float sum = 0.0f;
+          for (size_t s = 0; s < cached_count + t + 1; s++) {
+            mha_score[k][q][t][s] = expf(mha_score[k][q][t][s] - max);
+            sum += mha_score[k][q][t][s];
+          }
+          // - Normalize
+          for (size_t s = 0; s < cached_count + t + 1; s++) {
+            mha_score[k][q][t][s] /= sum;
+          }
 
-        for (size_t t = 0; t < token_count; t++) {
           // Weighted sum of the values, here the access function of
           // mha_att is to please the output matmul
           for (size_t h = 0; h < head_dim; h++) {
             mha_att[t][k][q][h] = 0.0f;
           }
-          for (size_t p = 0; p <= cached_count + t; p++) {
+          for (size_t s = 0; s < cached_count + t + 1; s++) {
             for (size_t h = 0; h < head_dim; h++) {
               mha_att[t][k][q][h] +=
-                  mha_score[k][q][t][p] * v_cache[l][k][p][h];
+                  mha_score[k][q][t][s] * v_cache[l][k][s][h];
             }
           }
         }
       }
     }
 
+    #pragma omp barrier
+
     // Final matmul to get the output of the attention
     // Note we reshape mha_att[t][k][q][h] to mha_att[t][kqh] with
     // 0 <= kqh < embedding_dim (just casting because memory layout is ok)
+    #pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         mha_out[t][e] =
@@ -1192,13 +1219,17 @@ static void transformer_predict_chunk(
     }
 
     // Residual connection back into x
+    #pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         embedding[t][e] += mha_out[t][e];
       }
     }
 
+    #pragma omp barrier
+
     // Feed-forward network's rmsnorm
+    #pragma omp single
     rmsnorm(
         token_count,
         embedding_dim,
@@ -1209,6 +1240,7 @@ static void transformer_predict_chunk(
     );
 
     // Feed-forward's fully-connected matmul (a.k.a. gate)
+    #pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t h = 0; h < hidden_dim; h++) {
         ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
@@ -1216,6 +1248,7 @@ static void transformer_predict_chunk(
     }
 
     // Feed-forward's up matmul
+    #pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t h = 0; h < hidden_dim; h++) {
         ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
@@ -1223,6 +1256,7 @@ static void transformer_predict_chunk(
     }
 
     // SwiGLU non-linearity
+    #pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < hidden_dim; e++) {
         // SiLU(x)=x*σ(x), where σ(x) is the logistic sigmoid
@@ -1232,7 +1266,10 @@ static void transformer_predict_chunk(
       }
     }
 
+    #pragma omp barrier
+
     // Final matmul to get the output of the feed-forward network
+    #pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
@@ -1240,13 +1277,17 @@ static void transformer_predict_chunk(
     }
 
     // Residual connection
+    #pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         embedding[t][e] += ffn_out[t][e];
       }
     }
 
+    #pragma omp barrier
+
     #ifdef DEBUG
+    #pragma omp single
     if (l == 0 || l == layer_count - 1) {
       size_t mha_len = token_count * embedding_dim;
       size_t att_len = token_count * q_head_count * head_dim;
@@ -1271,6 +1312,7 @@ static void transformer_predict_chunk(
   }
 
   // Final rmsnorm
+  #pragma omp single
   rmsnorm(
       token_count,
       embedding_dim,
@@ -1281,6 +1323,7 @@ static void transformer_predict_chunk(
   );
 
   // Classifier into logits
+  #pragma omp single
   for (size_t l = 0; l < logits_count; l++) {
     for (size_t v = 0; v < vocabulary_len; v++) {
       logits[l][v] =
@@ -1406,6 +1449,7 @@ void transformer_predict(
         (float (*)[vocabulary_len])chunk_logits
     );
 
+    #pragma omp single
     s->cached_count += chunk_token_count;
   }
 }
