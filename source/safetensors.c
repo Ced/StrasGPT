@@ -53,6 +53,25 @@ void safetensors_print(FILE* f, const safetensors_t* safetensors) {
   fprintf(f, "--- vocabulary_len: %zu\n", safetensors->vocabulary_len);
   fprintf(f, "--- context_len:    %zu\n", safetensors->context_len);
   fprintf(f, "--- rope_theta:     %.1f\n", safetensors->rope_theta);
+  fprintf(
+      f,
+      "--- rope_layout:    %s\n",
+      safetensors->rope_grouped_layout ? "grouped" : "interleaved"
+  );
+  fprintf(f, "--- mrope_sections: ");
+  if (safetensors->mrope_section_count == 0) {
+    fprintf(f, "none\n");
+  } else {
+    fprintf(f, "[");
+    for (size_t i = 0; i < safetensors->mrope_section_count; i++) {
+      fprintf(f, "%zu", safetensors->mrope_section[i]);
+      if (i == safetensors->mrope_section_count - 1) {
+        fprintf(f, "]\n");
+      } else {
+        fprintf(f, ", ");
+      }
+    }
+  }
   fprintf(f, "--- bos_token_id:   %d\n",  safetensors->bos_token_id);
   fprintf(f, "--- eos_token_id:   %d\n", safetensors->bos_token_id);
 
@@ -166,6 +185,20 @@ void safetensors_print_model_infos(FILE* f, const safetensors_t* s) {
   fprintf(f, "--- vocabulary_len:           %zu\n", s->vocabulary_len);
   fprintf(f, "--- context_len:              %zu\n", s->context_len);
   fprintf(f, "--- rope_theta:               %.1f\n", s->rope_theta);
+  fprintf(f, "--- mrope_sections:           ");
+  if (s->mrope_section_count == 0) {
+    fprintf(f, "none\n");
+  } else {
+    fprintf(f, "[");
+    for (size_t i = 0; i < s->mrope_section_count; i++) {
+      fprintf(f, "%zu", s->mrope_section[i]);
+      if (i == s->mrope_section_count - 1) {
+        fprintf(f, "]\n");
+      } else {
+        fprintf(f, ", ");
+      }
+    }
+  }
 
   size_t embedding_len = s->vocabulary_len * s->embedding_dim;
   size_t mha_norm_len = s->layer_count * s->embedding_dim;

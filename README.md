@@ -4,7 +4,7 @@
   <img src="assets/llama_math-info.png" width="300" height="300" alt="Cute Llama">
 </p>
 
-This program is a direct C implementation of the LLaMa 3.x LLM transformer architecture, reusing the tokenizer and the sampler of Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) project and its fork by James Delancey [llama3.c](https://github.com/jameswdelancey/llama3.c) (we warmly thank you!). Given an input prompt, StrasGPT can generate a text that continues it. It was initially designed as a parallel programming project for master students in 2025 (students had to parallelize it with OpenMP + MPI). It is now getting continued for fun and (polyhedral) compiler research.
+This program is a direct C implementation of the Qwen3 / LLaMa 3.x / Mistral LLM transformer architecture, reusing the tokenizer and the sampler of Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) project and its fork by James Delancey [llama3.c](https://github.com/jameswdelancey/llama3.c) (we warmly thank you!). Given an input prompt, StrasGPT can generate a text that continues it. It was initially designed as a parallel programming project for master students in 2025 (students had to parallelize it with OpenMP + MPI). It is now getting continued for fun and (polyhedral) compiler research.
 
 ## Get and compile StrasGPT
 
@@ -23,7 +23,7 @@ There are several other building targets:
 
 ## Get the model files
 
-You can use, e.g., LLaMa 3.x or Mistral checkpoints from HuggingFace. You will need to create an [HuggingFace Account](https://huggingface.co/), and get an access token (click on your profile icon, then "Access Tokens"). Finally you'll need to login then to download the desired models, e.g.:
+You can use, e.g., Qwen3, LLaMa 3.x or Mistral checkpoints from HuggingFace. You will need to create an [HuggingFace Account](https://huggingface.co/), and get an access token (click on your profile icon, then "Access Tokens"). Finally you'll need to login then to download the desired models, e.g. here are some tested models:
 
 ```bash
 pip install 'huggingface_hub[cli]'
@@ -32,7 +32,14 @@ git clone https://huggingface.co/meta-llama/Llama-3.2-1B
 git clone https://huggingface.co/meta-llama/Llama-3.2-3B
 git clone https://huggingface.co/meta-llama/Llama-3.1-8B
 git clone https://huggingface.co/mistralai/Mistral-Nemo-Base-2407
+git clone https://huggingface.co/mistralai/Ministral-8B-Instruct-2410
 git clone https://huggingface.co/mistralai/Mistral-Small-24B-Base-2501
+git clone https://huggingface.co/Qwen/Qwen3-0.6B
+git clone https://huggingface.co/Qwen/Qwen3-4B
+git clone https://huggingface.co/Qwen/Qwen3-14B
+git clone https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct
+git clone https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
+git clone https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct
 ```
 
 ## Run StrasGPT

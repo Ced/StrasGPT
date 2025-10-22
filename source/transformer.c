@@ -17,7 +17,7 @@
 static transformer_configuration_t* configuration_from_safetensors(
     safetensors_t* safetensors
 ) {
-  transformer_configuration_t* config = malloc(sizeof(*config));
+  transformer_configuration_t* config = calloc(1, sizeof(*config));
   if (config == NULL) {
     UTIL_DIE("failed to malloc for transformer_configuration_t");
   }
@@ -30,6 +30,19 @@ static transformer_configuration_t* configuration_from_safetensors(
   config->vocabulary_len = safetensors->vocabulary_len;
   config->context_len = safetensors->context_len;
   config->rope_theta = safetensors->rope_theta;
+  config->mrope_section_count = safetensors->mrope_section_count;
+  if (config->mrope_section_count > 0) {
+    size_t size = config->mrope_section_count * sizeof(*config->mrope_section);
+    config->mrope_section = calloc(1, size);
+    if (config->mrope_section == NULL) {
+      UTIL_DIE("failed to malloc for mrope_section");
+    }
+    for (size_t i = 0; i < config->mrope_section_count; i++) {
+      config->mrope_section[i] = safetensors->mrope_section[i];
+    }
+  } else {
+    config->mrope_section = NULL;
+  }
   config->aliased_out_weight = safetensors_aliased_out_weight(safetensors);
   return config;
 }
@@ -100,13 +113,72 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   }
 
   // Initialize RoPE cosine and sine values
-  for (size_t i = 0; i < t->context_len; i++) {
-    for (size_t j = 0; j < t->head_dim; j += 2) {
-      float freq = 1.0f / powf(t->rope_theta, j / (float)t->head_dim);
-      float val = i * freq;
-      s->rope_cos_sin[i * t->head_dim + j] = cosf(val);
-      s->rope_cos_sin[i * t->head_dim + j + 1] = sinf(val);
+  if (t->mrope_section_count == 0) {
+    for (size_t i = 0; i < t->context_len; i++) {
+      for (size_t j = 0; j < t->head_dim; j += 2) {
+        float freq = 1.0f / powf(t->rope_theta, j / (float)t->head_dim);
+        float val = i * freq;
+        s->rope_cos_sin[i * t->head_dim + j] = cosf(val);
+        s->rope_cos_sin[i * t->head_dim + j + 1] = sinf(val);
+      }
     }
+  } else {
+    //UTIL_DIE("TODO");
+    // Calculate section offsets
+    size_t section_offsets[4];
+    section_offsets[0] = 0;
+    for (size_t sec = 0; sec < t->mrope_section_count; sec++) {
+      section_offsets[sec + 1] = section_offsets[sec] + t->mrope_section[sec];
+    }
+
+    // Precompute RoPE for each section
+    for (size_t i = 0; i < t->context_len; i++) {
+      for (size_t sec = 0; sec < t->mrope_section_count; sec++) {
+        size_t section_start = section_offsets[sec];
+        size_t section_size = t->mrope_section[sec];
+
+        for (size_t j = 0; j < section_size; j++) {
+          // Key: denominator is 2 * section_size, not head_dim
+          float freq =
+              1.0f / powf(t->rope_theta, (2.0f * j) / (2.0f * section_size));
+          float val = i * freq; // i is the token position
+
+          size_t dim_idx = section_start + j;
+          s->rope_cos_sin[i * t->head_dim + dim_idx * 2] = cosf(val);
+          s->rope_cos_sin[i * t->head_dim + dim_idx * 2 + 1] = sinf(val);
+        }
+      }
+    }
+
+    // Calculate section offsets
+    /*int section_offsets[4];
+    section_offsets[0] = 0;
+    for (int sec = 0; sec < t->mrope_section_count; sec++) {
+      section_offsets[sec + 1] = section_offsets[sec] + t->mrope_section[sec];
+    }
+
+    // Layout: [pos0_dim0_real, pos0_dim1_real, ..., pos0_dimN_real,
+    //          pos0_dim0_imag, pos0_dim1_imag, ..., pos0_dimN_imag,
+    //          pos1_dim0_real, pos1_dim1_real, ...]
+    int half_head = t->head_dim / 2;
+
+    for (size_t i = 0; i < t->context_len; i++) {
+      for (int sec = 0; sec < t->mrope_section_count; sec++) {
+        int section_start = section_offsets[sec];
+        int section_size = t->mrope_section[sec];
+
+        for (int j = 0; j < section_size; j++) {
+          float freq =
+              1.0f / powf(t->rope_theta, (2.0f * j) / (2.0f * section_size));
+          float val = i * freq;
+
+          int dim_idx = section_start + j;
+          s->rope_cos_sin[i * t->head_dim + dim_idx] = cosf(val); // real part
+          s->rope_cos_sin[i * t->head_dim + half_head + dim_idx] =
+              sinf(val); // imaginary part
+        }
+      }
+    }*/
   }
 
   return s;
@@ -296,12 +368,34 @@ static void load_mha_q_weight(
       &weights->mha_q_weight[index * len]
   );
 
-  // Permute the weight from Hugging Face layout to Meta layout
-  permute_hf_to_meta(
-      safetensors->q_head_count * safetensors->head_dim,
-      safetensors->embedding_dim,
-      safetensors->q_head_count,
-      &weights->mha_q_weight[index * len]
+  // Permute the weight from grouped (Hugging Face) layout to
+  // interleaved layout (Meta layout) if necessary
+  if (safetensors->rope_grouped_layout) {
+    permute_hf_to_meta(
+        safetensors->q_head_count * safetensors->head_dim,
+        safetensors->embedding_dim,
+        safetensors->q_head_count,
+        &weights->mha_q_weight[index * len]
+    );
+  }
+}
+
+static void load_mha_q_norm_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  size_t len = safetensors->head_dim;
+  if (tensor->size != len * sizeof(*weights->mha_q_norm_weight)) {
+    UTIL_DIE("unexpected size for mha q norm weight");
+  }
+
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->mha_q_norm_weight[index * len]
   );
 }
 
@@ -314,7 +408,13 @@ static void load_mha_k_weight(
   size_t qkv_weight_dim = safetensors->head_dim * safetensors->embedding_dim;
   size_t len = safetensors->kv_head_count * qkv_weight_dim;
   if (tensor->size != len * sizeof(*weights->mha_k_weight)) {
-    UTIL_DIE("unexpected size for mha k weight");
+    size_t size = len * sizeof(*weights->mha_k_weight);
+    char msg[SAFETENSORS_MAX_STRING];
+    char* die = "unexpected size for mha k weight";
+    snprintf(
+        msg, sizeof(msg), "%s: have %zu expected %zu", die, size, tensor->size
+    );
+    UTIL_DIE(msg);
   }
 
   load_data(
@@ -324,12 +424,34 @@ static void load_mha_k_weight(
       &weights->mha_k_weight[index * len]
   );
 
-  // Permute the weight from Hugging Face layout to Meta layout
-  permute_hf_to_meta(
-      safetensors->kv_head_count * safetensors->head_dim,
-      safetensors->embedding_dim,
-      safetensors->kv_head_count,
-      &weights->mha_k_weight[index * len]
+  // Permute the weight from grouped (Hugging Face) layout to
+  // interleaved layout (Meta layout) if necessary
+  if (safetensors->rope_grouped_layout) {
+    permute_hf_to_meta(
+        safetensors->kv_head_count * safetensors->head_dim,
+        safetensors->embedding_dim,
+        safetensors->kv_head_count,
+        &weights->mha_k_weight[index * len]
+    );
+  }
+}
+
+static void load_mha_k_norm_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  size_t len = safetensors->head_dim;
+  if (tensor->size != len * sizeof(*weights->mha_k_norm_weight)) {
+    UTIL_DIE("unexpected size for mha q norm weight");
+  }
+
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->mha_k_norm_weight[index * len]
   );
 }
 
@@ -489,6 +611,69 @@ static void load_out_weight(
   );
 }
 
+typedef struct {
+  const char* name;  // Tensor name pattern
+  const char* alias; // Acceptable alias to that name pattern
+} name_alias_t;
+
+// Normalize a tensor name into our base naming:
+// return out if a rewrite occurred, return the original name otherwise.
+static const char* normalize_name(const char* name, size_t out_len, char* out) {
+  const name_alias_t alias_table[] = {
+      // Embedding tensor name aliases
+      {SAFETENSORS_PATTERN_EMBEDDING_WEIGHT,
+       "model.language_model.embed_tokens.weight"},
+      // Multi-head attention tensor name aliases
+      {SAFETENSORS_PATTERN_MHA_NORM_WEIGHT,
+       "model.language_model.layers.%d.input_layernorm.weight"},
+      {SAFETENSORS_PATTERN_MHA_Q_WEIGHT,
+       "model.language_model.layers.%d.self_attn.q_proj.weight"},
+      {SAFETENSORS_PATTERN_MHA_Q_NORM_WEIGHT,
+       "model.language_model.layers.%d.self_attn.q_norm.weight"},
+      {SAFETENSORS_PATTERN_MHA_K_WEIGHT,
+       "model.language_model.layers.%d.self_attn.k_proj.weight"},
+      {SAFETENSORS_PATTERN_MHA_K_NORM_WEIGHT,
+       "model.language_model.layers.%d.self_attn.k_norm.weight"},
+      {SAFETENSORS_PATTERN_MHA_V_WEIGHT,
+       "model.language_model.layers.%d.self_attn.v_proj.weight"},
+      {SAFETENSORS_PATTERN_MHA_OUT_WEIGHT,
+       "model.language_model.layers.%d.self_attn.o_proj.weight"},
+      // Feed-forward network tensor name aliases
+      {SAFETENSORS_PATTERN_FFN_NORM_WEIGHT,
+       "model.language_model.layers.%d.post_attention_layernorm.weight"},
+      {SAFETENSORS_PATTERN_FFN_FC_WEIGHT,
+       "model.language_model.layers.%d.mlp.gate_proj.weight"},
+      {SAFETENSORS_PATTERN_FFN_UP_WEIGHT,
+       "model.language_model.layers.%d.mlp.up_proj.weight"},
+      {SAFETENSORS_PATTERN_FFN_OUT_WEIGHT,
+       "model.language_model.layers.%d.mlp.down_proj.weight"},
+      // Output tensor name aliases
+      {SAFETENSORS_PATTERN_OUT_NORM_WEIGHT, "model.language_model.norm.weight"},
+      {SAFETENSORS_PATTERN_OUT_WEIGHT, "lm_head.weight"}
+  };
+
+  size_t alias_count = sizeof(alias_table) / sizeof(alias_table[0]);
+
+  for (size_t i = 0; i < alias_count; i++) {
+    size_t idx = 0;
+    if (match_name(name, alias_table[i].alias, &idx)) {
+      // Build base name string by inserting idx into the alias pattern
+      // Note: base patterns without %d will just ignore idx.
+      if (strstr(alias_table[i].name, "%d")) {
+        snprintf(out, out_len, alias_table[i].name, (int)idx);
+      } else {
+        snprintf(out, out_len, "%s", alias_table[i].name);
+      }
+      return out;
+    } else if (match_name(name, alias_table[i].name, &idx)) {
+      // If no alias matched but the name is a base name, we can stop there
+      return name;
+    }
+  }
+  // No alias matched; return original
+  return name;
+}
+
 // Structure to map tensor name patterns to loading functions
 typedef struct {
   const char* pattern; // e.g. "model.layers.%d.input_layernorm.weight"
@@ -511,7 +696,9 @@ static bool tensor_load(
       {SAFETENSORS_PATTERN_EMBEDDING_WEIGHT, load_embedding_weight},
       {SAFETENSORS_PATTERN_MHA_NORM_WEIGHT, load_mha_norm_weight},
       {SAFETENSORS_PATTERN_MHA_Q_WEIGHT, load_mha_q_weight},
+      {SAFETENSORS_PATTERN_MHA_Q_NORM_WEIGHT, load_mha_q_norm_weight},
       {SAFETENSORS_PATTERN_MHA_K_WEIGHT, load_mha_k_weight},
+      {SAFETENSORS_PATTERN_MHA_K_NORM_WEIGHT, load_mha_k_norm_weight},
       {SAFETENSORS_PATTERN_MHA_V_WEIGHT, load_mha_v_weight},
       {SAFETENSORS_PATTERN_MHA_OUT_WEIGHT, load_mha_out_weight},
       {SAFETENSORS_PATTERN_FFN_NORM_WEIGHT, load_ffn_norm_weight},
@@ -523,12 +710,29 @@ static bool tensor_load(
   };
   size_t route_count = sizeof(loading_table) / sizeof(loading_table[0]);
 
-  for (size_t i = 0; i < route_count; i++) {
-    const char* name = tensor->name;
-    size_t index = 0; // Will be set by match_name(), then unused
+  // Get tensor's normalized name
+  char base_name[SAFETENSORS_MAX_STRING];
+  const char* name = normalize_name(tensor->name, sizeof(base_name), base_name);
 
+  for (size_t i = 0; i < route_count; i++) {
+    size_t index = 0; // Will be set by match_name(), then unused
     if (match_name(name, loading_table[i].pattern, &index)) {
       loading_table[i].loader(safetensors, tensor, index, weights);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Return true if a QK Norm tensor is present
+static bool has_qk_norm(safetensors_t* t) {
+  for (size_t i = 0; i < t->tensor_count; i++) {
+    // Get tensor's normalized name
+    char base_name[SAFETENSORS_MAX_STRING];
+    const char* name =
+        normalize_name(t->tensor[i].name, sizeof(base_name), base_name);
+    size_t index = 0; // Will be set by match_name(), then unused
+    if (match_name(name, SAFETENSORS_PATTERN_MHA_Q_NORM_WEIGHT, &index)) {
       return true;
     }
   }
@@ -547,6 +751,7 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   size_t embedding_len = t->vocabulary_len * t->embedding_dim;
   size_t mha_norm_len = t->layer_count * t->embedding_dim;
   size_t mha_q_len = t->layer_count * t->q_head_count * qkv_weight_dim;
+  size_t mha_qk_norm_len = t->layer_count * t->head_dim;
   size_t mha_kv_len = t->layer_count * t->kv_head_count * qkv_weight_dim;
   size_t mha_out_dim = t->q_head_count * t->head_dim;
   size_t mha_out_len = t->layer_count * t->embedding_dim * mha_out_dim;
@@ -560,6 +765,7 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   size_t embedding_size = embedding_len * sizeof(*w->embedding_weight);
   size_t mha_norm_size = mha_norm_len * sizeof(*w->mha_norm_weight);
   size_t mha_q_size = mha_q_len * sizeof(*w->mha_q_weight);
+  size_t mha_qk_norm_size = mha_qk_norm_len * sizeof(*w->mha_q_norm_weight);
   size_t mha_kv_size = mha_kv_len * sizeof(*w->mha_k_weight);
   size_t mha_out_size = mha_out_len * sizeof(*w->mha_out_weight);
   size_t ffn_norm_size = ffn_norm_len * sizeof(*w->ffn_norm_weight);
@@ -586,6 +792,11 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   } else {
     w->out_weight = aligned_alloc(UTIL_ALIGNMENT, out_size);
   }
+  bool qk_normalization = has_qk_norm(t);
+  if (qk_normalization) {
+    w->mha_q_norm_weight = aligned_alloc(UTIL_ALIGNMENT, mha_qk_norm_size);
+    w->mha_k_norm_weight = aligned_alloc(UTIL_ALIGNMENT, mha_qk_norm_size);
+  }
 
   // Ensure all mallocs went fine
   if (!w->embedding_weight ||
@@ -599,7 +810,9 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
       !w->ffn_up_weight ||
       !w->ffn_out_weight ||
       !w->out_norm_weight ||
-      (!w->out_weight && !is_out_weigth_aliased)) {
+      (!w->out_weight && !is_out_weigth_aliased) ||
+      (qk_normalization && !w->mha_q_norm_weight) ||
+      (qk_normalization && !w->mha_k_norm_weight)) {
     UTIL_DIE("failed to malloc for weights");
   }
 
@@ -640,7 +853,9 @@ void transformer_free(transformer_t* transformer) {
   free(w->embedding_weight);
   free(w->mha_norm_weight);
   free(w->mha_q_weight);
+  free(w->mha_q_norm_weight);
   free(w->mha_k_weight);
+  free(w->mha_k_norm_weight);
   free(w->mha_v_weight);
   free(w->mha_out_weight);
   free(w->ffn_norm_weight);
@@ -669,6 +884,7 @@ void transformer_free(transformer_t* transformer) {
   free(s->rope_cos_sin);
   free(s);
 
+  free(c->mrope_section);
   free(c);
 
   free(transformer);
@@ -694,6 +910,20 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   fprintf(f, "--- vocabulary_len:     %zu\n", c->vocabulary_len);
   fprintf(f, "--- context_len:        %zu\n", c->context_len);
   fprintf(f, "--- rope_theta:         %.1f\n", c->rope_theta);
+  fprintf(f, "--- mrope_sections:     ");
+  if (c->mrope_section_count == 0) {
+    fprintf(f, "none\n");
+  } else {
+    fprintf(f, "[");
+    for (size_t i = 0; i < c->mrope_section_count; i++) {
+      fprintf(f, "%zu", c->mrope_section[i]);
+      if (i == c->mrope_section_count - 1) {
+        fprintf(f, "]\n");
+      } else {
+        fprintf(f, ", ");
+      }
+    }
+  }
   char* aliased_out = c->aliased_out_weight ? "true" : "false";
   fprintf(f, "--- aliased_out_weight: %s\n", aliased_out);
 
@@ -702,6 +932,7 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   size_t embedding_len = c->vocabulary_len * c->embedding_dim;
   size_t mha_norm_len = c->layer_count * c->embedding_dim;
   size_t mha_q_len = c->layer_count * c->q_head_count * qkv_weight_dim;
+  size_t mha_qk_norm_len = c->layer_count * c->head_dim;
   size_t mha_kv_len = c->layer_count * c->kv_head_count * qkv_weight_dim;
   size_t mha_out_dim = c->q_head_count * c->head_dim;
   size_t mha_out_len = c->layer_count * c->embedding_dim * mha_out_dim;
@@ -717,7 +948,9 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   double embedding_gb = (embedding_len * sizeof(*w->embedding_weight)) / gb;
   double mha_norm_gb = (mha_norm_len * sizeof(*w->mha_norm_weight)) / gb;
   double mha_q_gb = (mha_q_len * sizeof(*w->mha_q_weight)) / gb;
+  double mha_q_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_q_norm_weight)) / gb;
   double mha_k_gb = (mha_kv_len * sizeof(*w->mha_k_weight)) / gb;
+  double mha_k_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_k_norm_weight)) / gb;
   double mha_v_gb = (mha_kv_len * sizeof(*w->mha_v_weight)) / gb;
   double mha_out_gb = (mha_out_len * sizeof(*w->mha_out_weight)) / gb;
   double ffn_norm_gb = (ffn_norm_len * sizeof(*w->ffn_norm_weight)) / gb;
@@ -734,43 +967,53 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
 
   fprintf(f, "- Weights (%.2f GB):\n", total_gb);
   char s[SAFETENSORS_MAX_STRING];
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "embedding", embedding_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "embedding", embedding_gb);
   util_matrix_summary(s, 1, embedding_len, 3, w->embedding_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_norm", mha_norm_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_norm", mha_norm_gb);
   util_matrix_summary(s, 1, mha_norm_len, 3, w->mha_norm_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_q", mha_q_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q", mha_q_gb);
   util_matrix_summary(s, 1, mha_q_len, 3, w->mha_q_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_k", mha_k_gb);
+  if (w->mha_q_norm_weight) {
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q_norm", mha_q_norm_gb);
+    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_q_norm_weight);
+  }
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k", mha_k_gb);
   util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_v", mha_v_gb);
+  if (w->mha_k_norm_weight) {
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k_norm", mha_k_norm_gb);
+    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_k_norm_weight);
+  }
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_v", mha_v_gb);
   util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_out", mha_out_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_out", mha_out_gb);
   util_matrix_summary(s, 1, mha_out_len, 3, w->mha_out_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "ffn_norm", ffn_norm_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_norm", ffn_norm_gb);
   util_matrix_summary(s, 1, ffn_norm_len, 3, w->ffn_norm_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "ffn_fc", ffn_fc_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_fc", ffn_fc_gb);
   util_matrix_summary(s, 1, ffn_fc_len, 3, w->ffn_fc_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "ffn_up", ffn_up_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_up", ffn_up_gb);
   util_matrix_summary(s, 1, ffn_up_len, 3, w->ffn_up_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "ffn_out", ffn_out_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_out", ffn_out_gb);
   util_matrix_summary(s, 1, ffn_out_len, 3, w->ffn_out_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "out_norm", out_norm_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "out_norm", out_norm_gb);
   util_matrix_summary(s, 1, out_norm_len, 3, w->out_norm_weight);
 
   if (c->aliased_out_weight) {
-    fprintf(f, "--- %9s (%7.4f GB): alias to embedding\n", "out", 0.);
+    fprintf(f, "--- %10s (%7.4f GB): alias to embedding\n", "out", 0.);
   } else {
-    snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "out", out_gb);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "out", out_gb);
     util_matrix_summary(s, 1, out_len, 3, w->out_weight);
   }
 }
@@ -799,26 +1042,23 @@ float* transformer_logits_malloc(
 // RMSNorm (Root Mean Square Normalization) + scaling operation
 // y = (x / sqrt(mean(x**2) + epsilon)) * w
 static void rmsnorm(
-    size_t sequence_len,
     size_t embedding_dim,
-    float y[sequence_len][embedding_dim],
-    float x[sequence_len][embedding_dim],
+    float y[embedding_dim],
+    float x[embedding_dim],
     uint16_t w[embedding_dim],
     float epsilon
 ) {
-  for (size_t i = 0; i < sequence_len; i++) {
-    // Calculate sum of squares
-    float ss = 0.0f;
-    for (size_t j = 0; j < embedding_dim; j++) {
-      ss += x[i][j] * x[i][j];
-    }
-    ss /= embedding_dim;
-    ss += epsilon;
-    ss = 1.0f / sqrtf(ss);
-    // Normalize and scale
-    for (size_t j = 0; j < embedding_dim; j++) {
-      y[i][j] = util_bf16_to_f32(w[j]) * (ss * x[i][j]);
-    }
+  // Calculate sum of squares
+  float ss = 0.0f;
+  for (size_t j = 0; j < embedding_dim; j++) {
+    ss += x[j] * x[j];
+  }
+  ss /= embedding_dim;
+  ss += epsilon;
+  ss = 1.0f / sqrtf(ss);
+  // Normalize and scale
+  for (size_t j = 0; j < embedding_dim; j++) {
+    y[j] = util_bf16_to_f32(w[j]) * (ss * x[j]);
   }
 }
 
@@ -1027,8 +1267,10 @@ static void transformer_predict_chunk(
     uint16_t mha_norm_weight[restrict layer_count][embedding_dim],
     uint16_t mha_q_weight[restrict layer_count][kv_head_count]
                          [q_head_per_kv_head_count][head_dim][embedding_dim],
+    uint16_t mha_q_norm_weight[restrict layer_count][head_dim],
     uint16_t mha_k_weight[restrict layer_count][kv_head_count][head_dim]
                          [embedding_dim],
+    uint16_t mha_k_norm_weight[restrict layer_count][head_dim],
     uint16_t mha_v_weight[restrict layer_count][kv_head_count][head_dim]
                          [embedding_dim],
     uint16_t mha_out_weight[restrict layer_count][embedding_dim]
@@ -1075,15 +1317,15 @@ static void transformer_predict_chunk(
   for (size_t l = 0; l < layer_count; l++) {
     // Attention rmsnorm: normalize the embedding vectors for the current layer
     #pragma omp single
-    rmsnorm(
-        token_count,
-        embedding_dim,
-        mha_norm,
-        embedding,
-        mha_norm_weight[l],
-        epsilon
-    );
-
+    for (size_t t = 0; t < token_count; t++) {
+      rmsnorm(
+          embedding_dim,
+          mha_norm[t],
+          embedding[t],
+          mha_norm_weight[l],
+          epsilon
+      );
+    }
 
     // K matmul for all KV-heads, storing in the k_cache
     #pragma omp for collapse(2) schedule(static) nowait
@@ -1122,6 +1364,22 @@ static void transformer_predict_chunk(
       }
     }
 
+    // Per-head normalization of K, if applicable
+    if (mha_k_norm_weight) {
+      #pragma omp for collapse(2) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t t = 0; t < token_count; t++) {
+          rmsnorm(
+              head_dim,
+              k_cache[l][k][cached_count + t],
+              k_cache[l][k][cached_count + t],
+              mha_k_norm_weight[l],
+              epsilon
+          );
+        }
+      }
+    }
+
     #pragma omp barrier
 
     // Q matmul for all Q-heads
@@ -1149,6 +1407,24 @@ static void transformer_predict_chunk(
             float v1 = mha_q[k][q][t][h + 1];
             mha_q[k][q][t][h + 0] = v0 * fr - v1 * fi;
             mha_q[k][q][t][h + 1] = v0 * fi + v1 * fr;
+          }
+        }
+      }
+    }
+
+    // Per-head normalization of Q, if applicable
+    if (mha_q_norm_weight) {
+      #pragma omp for collapse(3) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
+            rmsnorm(
+                head_dim,
+                mha_q[k][q][t],
+                mha_q[k][q][t],
+                mha_q_norm_weight[l],
+                epsilon
+            );
           }
         }
       }
@@ -1230,14 +1506,15 @@ static void transformer_predict_chunk(
 
     // Feed-forward network's rmsnorm
     #pragma omp single
-    rmsnorm(
-        token_count,
-        embedding_dim,
-        ffn_norm,
-        embedding,
-        ffn_norm_weight[l],
-        epsilon
-    );
+    for (size_t t = 0; t < token_count; t++) {
+      rmsnorm(
+          embedding_dim,
+          ffn_norm[t],
+          embedding[t],
+          ffn_norm_weight[l],
+          epsilon
+      );
+    }
 
     // Feed-forward's fully-connected matmul (a.k.a. gate)
     #pragma omp for collapse(2) schedule(static) nowait
@@ -1313,14 +1590,15 @@ static void transformer_predict_chunk(
 
   // Final rmsnorm
   #pragma omp single
-  rmsnorm(
-      token_count,
-      embedding_dim,
-      embedding,
-      embedding,
-      out_norm_weight,
-      epsilon
-  );
+  for (size_t t = 0; t < token_count; t++) {
+    rmsnorm(
+        embedding_dim,
+        embedding[t],
+        embedding[t],
+        out_norm_weight,
+        epsilon
+    );
+  }
 
   // Classifier into logits
   #pragma omp for collapse(2)
@@ -1417,7 +1695,9 @@ void transformer_predict(
         (uint16_t (*)[embedding_dim])w->mha_norm_weight,
         (uint16_t (*)[kv_head_count][q_head_per_kv_head_count][head_dim]
                      [embedding_dim])w->mha_q_weight,
+        (uint16_t (*)[head_dim])w->mha_q_norm_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_k_weight,
+        (uint16_t (*)[head_dim])w->mha_k_norm_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_v_weight,
         (uint16_t (*)[embedding_dim][q_head_count * head_dim])w->mha_out_weight,
         (uint16_t (*)[embedding_dim])w->ffn_norm_weight,
