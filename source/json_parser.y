@@ -47,10 +47,11 @@
 %token <string> STRING
 %token <number> NUMBER
 %token <boolean> BOOLEAN
-%token NULL_ TYPE SHAPE OFFSET METADATA WEIGHT_MAP
+%token NULL_ TYPE SHAPE OFFSET METADATA TEXT_CONFIG WEIGHT_MAP
 %token BOS_TOKEN_ID EOS_TOKEN_ID
-%token EMBEDDING_DIM HEAD_DIM HIDDEN_DIM LAYER_COUNT Q_HEAD_COUNT KV_HEAD_COUNT
-%token VOCABULARY_LEN CONTEXT_LEN ROPE_THETA MODEL VOCAB
+%token EMBEDDING_DIM HEAD_DIM HIDDEN_DIM LAYER_COUNT MODEL_TYPE Q_HEAD_COUNT
+%token KV_HEAD_COUNT VOCABULARY_LEN CONTEXT_LEN MODEL VOCAB
+%token ROPE_THETA ROPE_SCALING MROPE_SECTION
 %token MODE_CONFIG MODE_INDEX MODE_SAFETENSORS MODE_TOKENIZER
 %start entry
 
@@ -126,6 +127,29 @@ config_member
       }
       parser_safetensors->layer_count = $3.ival;
     }
+  | MODEL_TYPE ':' STRING
+    {
+      if (strcmp($3, "llama") == 0) {
+        parser_safetensors->rope_grouped_layout = true;
+      } else if (strcmp($3, "mistral") == 0) {
+        parser_safetensors->rope_grouped_layout = true;
+      } else if (strcmp($3, "qwen3") == 0) {
+        parser_safetensors->rope_grouped_layout = false;
+      } else if (strcmp($3, "qwen3_vl") == 0) {
+        parser_safetensors->rope_grouped_layout = false;
+      } else if (strcmp($3, "qwen3_vl_text") == 0) {
+        parser_safetensors->rope_grouped_layout = false;
+      } else {
+        fprintf(
+            stderr,
+            "[StrasGPT] Warning: unknown model_type %s, "
+            "assuming RoPE grouped layout\n",
+            $3
+        );
+        parser_safetensors->rope_grouped_layout = true;
+      }
+      free($3);
+    }
   | Q_HEAD_COUNT ':' NUMBER
     {
       if (!$3.is_int) {
@@ -162,9 +186,70 @@ config_member
     {
       parser_safetensors->rope_theta = $3.fval;
     }
+  | ROPE_SCALING ':' '{' rope_scaling_member_list '}'
+  | ROPE_SCALING ':' NULL_
+  | TYPE ':' STRING
+    {
+      free($3);
+    }
+  | TEXT_CONFIG ':' config
+  | STRING ':'
+    {
+      // We enter special mode where keyword strings (e.g., "model" where
+      // Lex would return MODEL token) are considered as normal strings,
+      // to avoid issues if they are part of the model vocabulary
+      json_scanner_enter_kw_as_string_mode();
+    }
+    json_value
+    {
+      free($1);
+      json_scanner_leave_kw_as_string_mode();
+    }
+  ;
+
+rope_scaling_member_list
+  : rope_scaling_member_list ',' rope_scaling_member
+  | rope_scaling_member
+  ;
+
+rope_scaling_member
+  : MROPE_SECTION ':' '[' mrope_section_list ']'
   | STRING ':' json_value
     {
       free($1);
+    }
+
+mrope_section_list
+  : mrope_section_list ',' NUMBER
+    {
+      if (!$3.is_int) {
+        yyerror("non integer mrope section value");
+        YYABORT;
+      }
+      if (parser_safetensors->mrope_section_count >=
+          SAFETENSORS_MAX_MROPE_SECTION_COUNT) {
+        yyerror("too many mrope sections");
+        YYABORT;
+      }
+      parser_safetensors
+          ->mrope_section[parser_safetensors->mrope_section_count] = $3.ival;
+      parser_safetensors->mrope_section_count++;
+
+    }
+  | NUMBER
+    {
+      if (!$1.is_int) {
+        yyerror("non integer mrope section value");
+        YYABORT;
+      }
+      if (parser_safetensors->mrope_section_count >=
+          SAFETENSORS_MAX_MROPE_SECTION_COUNT) {
+        yyerror("too many mrope sections");
+        YYABORT;
+      }
+      parser_safetensors
+          ->mrope_section[parser_safetensors->mrope_section_count] = $1.ival;
+      parser_safetensors->mrope_section_count++;
     }
   ;
 

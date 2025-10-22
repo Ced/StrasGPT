@@ -1,5 +1,5 @@
 # Tools
-CC      = gcc
+CC      = clang
 LEX     = lex
 YACC    = yacc
 
@@ -69,15 +69,6 @@ DEPS := $(OBJ:.o=.d)
 clean:
 	/bin/rm -rf $(BUILD_DIR) $(EXEC)
 
-# Clang address sanitizer build
-asan: CFLAGS = -fsanitize=address -O1 -g $(WFLAGS) -I$(INC_DIR) -DDEBUG=1
-asan: LDFLAGS = -fsanitize=address -lm
-asan: clean all
-
-# Debug build with debug symbols
-debug: CFLAGS = -O1 -g $(WFLAGS) -I$(INC_DIR) -DDEBUG=1
-debug: clean all
-
 # Parallel MPI + OpenMP build
 BREW_LIBOMP_DIR = /opt/homebrew/opt/libomp/lib
 ifneq ($(wildcard $(BREW_LIBOMP_DIR)),)
@@ -89,3 +80,18 @@ parallel: CC = mpicc
 parallel: CFLAGS = $(OFLAGS) -fopenmp $(WFLAGS) -I$(INC_DIR) -DPARALLEL=1
 parallel: LDFLAGS = $(BREW_LIBOMP_LD_FLAGS) -lm
 parallel: all
+
+# Debug build with debug symbols
+debug: CFLAGS = -O1 -g $(WFLAGS) -I$(INC_DIR) -DDEBUG=1
+debug: clean all
+
+# Clang address sanitizer build
+asan: CFLAGS = -fsanitize=address -O1 -g $(WFLAGS) -I$(INC_DIR) -DDEBUG=1
+asan: LDFLAGS = -fsanitize=address -lm
+asan: clean all
+
+# Clang thread sanitizer build
+tsan: CC = mpicc
+tsan: CFLAGS = -fno-omit-frame-pointer -fsanitize=thread -O1 -g $(WFLAGS) -I$(INC_DIR) -DDEBUG=1 -DPARALLEL=1
+tsan: LDFLAGS = $(BREW_LIBOMP_LD_FLAGS) -fsanitize=thread -lm
+tsan: clean all

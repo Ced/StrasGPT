@@ -19,30 +19,34 @@ typedef struct transformer_configuration {
   size_t context_len;      // Maximum sequence length
   float  rope_theta;       // RoPE base frequency
   bool aliased_out_weight; // True if out_weight is aliased to embedding_weight
+  size_t mrope_section_count; // Number of multi-scale RoPE section (0 if none)
+  size_t* mrope_section;   // Sections for multi-scale RoPE (NULL if none)
 } transformer_configuration_t;
 
 typedef struct transformer_weights {
   // Embedding parameter set
-  uint16_t* embedding_weight; // [vocabulary_len][embedding_dim]
+  uint16_t* embedding_weight;  // [vocabulary_len][embedding_dim]
   // Decoder parameter set
   // - Multi-head attention
-  uint16_t* mha_norm_weight;  // [layer_count][embedding_dim]
-  uint16_t* mha_q_weight;     // [layer_count][q_head_count][
-                              //  head_dim][embedding_dim]
-  uint16_t* mha_k_weight;     // [layer_count][kv_head_count][
-                              //  head_dim][embedding_dim]
-  uint16_t* mha_v_weight;     // [layer_count][kv_head_count][
-                              //  head_dim][embedding_dim]
-  uint16_t* mha_out_weight;   // [layer_count][embedding_dim][
-                              //  q_head_count * head_dim]
+  uint16_t* mha_norm_weight;   // [layer_count][embedding_dim]
+  uint16_t* mha_q_weight;      // [layer_count][q_head_count][
+                               //  head_dim][embedding_dim]
+  uint16_t* mha_q_norm_weight; // [layer_count][head_dim]
+  uint16_t* mha_k_weight;      // [layer_count][kv_head_count][
+                               //  head_dim][embedding_dim]
+  uint16_t* mha_k_norm_weight; // [layer_count][head_dim]
+  uint16_t* mha_v_weight;      // [layer_count][kv_head_count][
+                               //  head_dim][embedding_dim]
+  uint16_t* mha_out_weight;    // [layer_count][embedding_dim][
+                               //  q_head_count * head_dim]
   // - Feed-forward network
-  uint16_t* ffn_norm_weight;  // [layer_count][embedding_dim]
-  uint16_t* ffn_fc_weight;    // [layer_count][embedding_dim][hidden_dim]
-  uint16_t* ffn_up_weight;    // [layer_count][embedding_dim][hidden_dim]
-  uint16_t* ffn_out_weight;   // [layer_count][hidden_dim][embedding_dim]
+  uint16_t* ffn_norm_weight;   // [layer_count][embedding_dim]
+  uint16_t* ffn_fc_weight;     // [layer_count][embedding_dim][hidden_dim]
+  uint16_t* ffn_up_weight;     // [layer_count][embedding_dim][hidden_dim]
+  uint16_t* ffn_out_weight;    // [layer_count][hidden_dim][embedding_dim]
   // Output parameter set
-  uint16_t* out_norm_weight;  // [embedding_dim]
-  uint16_t* out_weight;       // [vocabulary_len][embedding_dim]
+  uint16_t* out_norm_weight;   // [embedding_dim]
+  uint16_t* out_weight;        // [vocabulary_len][embedding_dim]
 } transformer_weights_t;
 
 typedef struct transformer_state {

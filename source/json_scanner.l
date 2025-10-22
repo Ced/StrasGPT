@@ -25,6 +25,7 @@ integer        [+-]?[0-9]+
 float          [+-]?(([0-9]*\.[0-9]+)|([0-9]+\.)|[0-9]+)([eE][+-]?[0-9]+)?
 
 metadata       \"__metadata__\"|\"metadata\"
+text_config    \"text_config\"
 type           \"dtype\"
 shape          \"shape\"
 offset         \"data_offsets\"
@@ -35,11 +36,14 @@ embedding_dim  \"hidden_size\"
 head_dim       \"head_dim\"
 hidden_dim     \"intermediate_size\"
 layer_count    \"num_hidden_layers\"
+model_type     \"model_type\"
 q_head_count   \"num_attention_heads\"
 kv_head_count  \"num_key_value_heads\"
 vocabulary_len \"vocab_size\"
 context_len    \"max_position_embeddings\"
 rope_theta     \"rope_theta\"
+rope_scaling   \"rope_scaling\"
+mrope_section  \"mrope_section\"
 model          \"model\"
 vocab          \"vocab\"
 
@@ -93,6 +97,11 @@ null           null
   return METADATA;
 }
 
+<INITIAL>{text_config} {
+  dump("text_config", yytext);
+  return TEXT_CONFIG;
+}
+
 <INITIAL>{weight_map} {
   dump("weight_map", yytext);
   return WEIGHT_MAP;
@@ -128,6 +137,11 @@ null           null
   return LAYER_COUNT;
 }
 
+<INITIAL>{model_type} {
+  dump("model_type", yytext);
+  return MODEL_TYPE;
+}
+
 <INITIAL>{q_head_count} {
   dump("q_head_count", yytext);
   return Q_HEAD_COUNT;
@@ -151,6 +165,16 @@ null           null
 <INITIAL>{rope_theta} {
   dump("rope_theta", yytext);
   return ROPE_THETA;
+}
+
+<INITIAL>{rope_scaling} {
+  dump("rope_scaling", yytext);
+  return ROPE_SCALING;
+}
+
+<INITIAL>{mrope_section} {
+  dump("mrope_section", yytext);
+  return MROPE_SECTION;
 }
 
 <INITIAL>{model} {
