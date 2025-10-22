@@ -21,13 +21,15 @@ There are several other building targets:
 
 ## Get the model files
 
-StrasGPT is directly compatible with HuggingFace format. At the university, files are directly provided on Parallel Programming virtual machines (see `~/partage/` folder). You can also download the smallest models directly from Seafile:
+StrasGPT is directly compatible with HuggingFace format. At the university, files are directly provided on Parallel Programming virtual machines (see `~/partage/model_zoo` folder and/or `~/model_zoo` folder). You can also download the smallest models directly from Seafile:
 - Password is `mastermathinfo`
 - [Llama 3.2 1B (2.5 GB)](https://seafile.unistra.fr/f/049e25022496491a86f0/)
 - [Llama 3.2 3B (6.4 GB)](https://seafile.unistra.fr/f/4cec4971b4f044afaff3/)
 - [Llama 3.1 8B (16.1 GB)](https://seafile.unistra.fr/f/c6864b246576405d944d/)
+- [Mistral Nemo Base 12B (24.5 GB)](https://seafile.unistra.fr/f/d1944c7f7a4742048a37/)
+- [Mistral Small Base 24B (47.2 GB)](https://seafile.unistra.fr/f/68f2612eeceb4b358f4b/)
 
-Out of the university, we can get LLaMa 3.x checkpoints from HuggingFace. In this case you will need to create an [HuggingFace Account](https://huggingface.co/), and get an access token (click on your profile icon, then "Access Tokens"). Finally you'll need to login then to download the desired models, e.g.:
+Out of the university, we can get LLaMa 3.x or Mistral checkpoints from HuggingFace. In this case you will need to create an [HuggingFace Account](https://huggingface.co/), and get an access token (click on your profile icon, then "Access Tokens"). Finally you'll need to login then to download the desired models, e.g.:
 
 ```bash
 pip install 'huggingface_hub[cli]'
@@ -35,7 +37,8 @@ huggingface-cli login
 git clone https://huggingface.co/meta-llama/Llama-3.2-1B
 git clone https://huggingface.co/meta-llama/Llama-3.2-3B
 git clone https://huggingface.co/meta-llama/Llama-3.1-8B
-git clone https://huggingface.co/meta-llama/Llama-3.1-70B
+git clone https://huggingface.co/mistralai/Mistral-Nemo-Base-2407
+git clone https://huggingface.co/mistralai/Mistral-Small-24B-Base-2501
 ```
 
 ## Run StrasGPT
