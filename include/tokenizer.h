@@ -9,7 +9,7 @@ struct options;
 
 #define TOKENIZER_FILE             "tokenizer.json"
 #define TOKENIZER_MAX_PRINT        4
-#define TOKENIZER_MAX_TOKEN_STRING 131072 // Enough for TikToken
+#define TOKENIZER_MAX_TOKEN_STRING 262144 // Enough for TikToken
 #define TOKENIZER_MAX_BYTE_STRING  512    // Must be multiple of 2
 #define TOKENIZER_STRING_TOKEN_BOS "<|begin_of_text|>"
 #define TOKENIZER_STRING_TOKEN_EOS "<|end_of_text|>"

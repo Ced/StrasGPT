@@ -47,7 +47,7 @@
 %token <string> STRING
 %token <number> NUMBER
 %token <boolean> BOOLEAN
-%token NULL_ TYPE SHAPE OFFSET METADATA WEIGHT_MAP
+%token NULL_ TYPE SHAPE OFFSET METADATA TEXT_CONFIG WEIGHT_MAP
 %token BOS_TOKEN_ID EOS_TOKEN_ID
 %token EMBEDDING_DIM HEAD_DIM HIDDEN_DIM LAYER_COUNT Q_HEAD_COUNT KV_HEAD_COUNT
 %token VOCABULARY_LEN CONTEXT_LEN ROPE_THETA MODEL VOCAB
@@ -162,9 +162,22 @@ config_member
     {
       parser_safetensors->rope_theta = $3.fval;
     }
-  | STRING ':' json_value
+  | TYPE ':' STRING
+    {
+      free($3);
+    }
+  | TEXT_CONFIG ':' config
+  | STRING ':'
+    {
+      // We enter special mode where keyword strings (e.g., "model" where
+      // Lex would return MODEL token) are considered as normal strings,
+      // to avoid issues if they are part of the model vocabulary
+      json_scanner_enter_kw_as_string_mode();
+    }
+    json_value
     {
       free($1);
+      json_scanner_leave_kw_as_string_mode();
     }
   ;
 

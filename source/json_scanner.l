@@ -25,6 +25,7 @@ integer        [+-]?[0-9]+
 float          [+-]?(([0-9]*\.[0-9]+)|([0-9]+\.)|[0-9]+)([eE][+-]?[0-9]+)?
 
 metadata       \"__metadata__\"|\"metadata\"
+text_config    \"text_config\"
 type           \"dtype\"
 shape          \"shape\"
 offset         \"data_offsets\"
@@ -91,6 +92,11 @@ null           null
 <INITIAL>{metadata} {
   dump("metadata", yytext);
   return METADATA;
+}
+
+<INITIAL>{text_config} {
+  dump("text_config", yytext);
+  return TEXT_CONFIG;
 }
 
 <INITIAL>{weight_map} {

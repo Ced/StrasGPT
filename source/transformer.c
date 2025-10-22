@@ -305,6 +305,25 @@ static void load_mha_q_weight(
   );
 }
 
+static void load_mha_q_norm_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  size_t len = safetensors->head_dim;
+  if (tensor->size != len * sizeof(*weights->mha_q_norm_weight)) {
+    UTIL_DIE("unexpected size for mha q norm weight");
+  }
+
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->mha_q_norm_weight[index * len]
+  );
+}
+
 static void load_mha_k_weight(
     const safetensors_t* safetensors,
     const safetensors_tensor_t* tensor,
@@ -314,7 +333,11 @@ static void load_mha_k_weight(
   size_t qkv_weight_dim = safetensors->head_dim * safetensors->embedding_dim;
   size_t len = safetensors->kv_head_count * qkv_weight_dim;
   if (tensor->size != len * sizeof(*weights->mha_k_weight)) {
-    UTIL_DIE("unexpected size for mha k weight");
+    size_t size = len * sizeof(*weights->mha_k_weight);
+    char msg[SAFETENSORS_MAX_STRING];
+    char* die = "unexpected size for mha k weight";
+    snprintf(msg, sizeof(msg), "%s: have %zu expected %zu", die, size, tensor->size);
+    UTIL_DIE(msg);
   }
 
   load_data(
@@ -330,6 +353,25 @@ static void load_mha_k_weight(
       safetensors->embedding_dim,
       safetensors->kv_head_count,
       &weights->mha_k_weight[index * len]
+  );
+}
+
+static void load_mha_k_norm_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  size_t len = safetensors->head_dim;
+  if (tensor->size != len * sizeof(*weights->mha_k_norm_weight)) {
+    UTIL_DIE("unexpected size for mha q norm weight");
+  }
+
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->mha_k_norm_weight[index * len]
   );
 }
 
@@ -489,6 +531,69 @@ static void load_out_weight(
   );
 }
 
+typedef struct {
+  const char* name;  // Tensor name pattern
+  const char* alias; // Acceptable alias to that name pattern
+} name_alias_t;
+
+// Normalize a tensor name into our base naming:
+// return out if a rewrite occurred, return the original name otherwise.
+static const char* normalize_name(const char* name, size_t out_len, char* out) {
+  const name_alias_t alias_table[] = {
+      // Embedding tensor name aliases
+      {SAFETENSORS_PATTERN_EMBEDDING_WEIGHT,
+       "model.language_model.embed_tokens.weight"},
+      // Multi-head attention tensor name aliases
+      {SAFETENSORS_PATTERN_MHA_NORM_WEIGHT,
+       "model.language_model.layers.%d.input_layernorm.weight"},
+      {SAFETENSORS_PATTERN_MHA_Q_WEIGHT,
+       "model.language_model.layers.%d.self_attn.q_proj.weight"},
+      {SAFETENSORS_PATTERN_MHA_Q_NORM_WEIGHT,
+       "model.language_model.layers.%d.self_attn.q_norm.weight"},
+      {SAFETENSORS_PATTERN_MHA_K_WEIGHT,
+       "model.language_model.layers.%d.self_attn.k_proj.weight"},
+      {SAFETENSORS_PATTERN_MHA_K_NORM_WEIGHT,
+       "model.language_model.layers.%d.self_attn.k_norm.weight"},
+      {SAFETENSORS_PATTERN_MHA_V_WEIGHT,
+       "model.language_model.layers.%d.self_attn.v_proj.weight"},
+      {SAFETENSORS_PATTERN_MHA_OUT_WEIGHT,
+       "model.language_model.layers.%d.self_attn.o_proj.weight"},
+      // Feed-forward network tensor name aliases
+      {SAFETENSORS_PATTERN_FFN_NORM_WEIGHT,
+       "model.language_model.layers.%d.post_attention_layernorm.weight"},
+      {SAFETENSORS_PATTERN_FFN_FC_WEIGHT,
+       "model.language_model.layers.%d.mlp.gate_proj.weight"},
+      {SAFETENSORS_PATTERN_FFN_UP_WEIGHT,
+       "model.language_model.layers.%d.mlp.up_proj.weight"},
+      {SAFETENSORS_PATTERN_FFN_OUT_WEIGHT,
+       "model.language_model.layers.%d.mlp.down_proj.weight"},
+      // Output tensor name aliases
+      {SAFETENSORS_PATTERN_OUT_NORM_WEIGHT, "model.language_model.norm.weight"},
+      {SAFETENSORS_PATTERN_OUT_WEIGHT, "lm_head.weight"}
+  };
+
+  size_t alias_count = sizeof(alias_table) / sizeof(alias_table[0]);
+
+  for (size_t i = 0; i < alias_count; i++) {
+    size_t idx = 0;
+    if (match_name(name, alias_table[i].alias, &idx)) {
+      // Build base name string by inserting idx into the alias pattern
+      // Note: base patterns without %d will just ignore idx.
+      if (strstr(alias_table[i].name, "%d")) {
+        snprintf(out, out_len, alias_table[i].name, (int)idx);
+      } else {
+        snprintf(out, out_len, "%s", alias_table[i].name);
+      }
+      return out;
+    } else if (match_name(name, alias_table[i].name, &idx)) {
+      // If no alias matched but the name is a base name, we can stop there
+      return name;
+    }
+  }
+  // No alias matched; return original
+  return name;
+}
+
 // Structure to map tensor name patterns to loading functions
 typedef struct {
   const char* pattern; // e.g. "model.layers.%d.input_layernorm.weight"
@@ -511,7 +616,9 @@ static bool tensor_load(
       {SAFETENSORS_PATTERN_EMBEDDING_WEIGHT, load_embedding_weight},
       {SAFETENSORS_PATTERN_MHA_NORM_WEIGHT, load_mha_norm_weight},
       {SAFETENSORS_PATTERN_MHA_Q_WEIGHT, load_mha_q_weight},
+      {SAFETENSORS_PATTERN_MHA_Q_NORM_WEIGHT, load_mha_q_norm_weight},
       {SAFETENSORS_PATTERN_MHA_K_WEIGHT, load_mha_k_weight},
+      {SAFETENSORS_PATTERN_MHA_K_NORM_WEIGHT, load_mha_k_norm_weight},
       {SAFETENSORS_PATTERN_MHA_V_WEIGHT, load_mha_v_weight},
       {SAFETENSORS_PATTERN_MHA_OUT_WEIGHT, load_mha_out_weight},
       {SAFETENSORS_PATTERN_FFN_NORM_WEIGHT, load_ffn_norm_weight},
@@ -523,12 +630,29 @@ static bool tensor_load(
   };
   size_t route_count = sizeof(loading_table) / sizeof(loading_table[0]);
 
-  for (size_t i = 0; i < route_count; i++) {
-    const char* name = tensor->name;
-    size_t index = 0; // Will be set by match_name(), then unused
+  // Get tensor's normalized name
+  char base_name[SAFETENSORS_MAX_STRING];
+  const char* name = normalize_name(tensor->name, sizeof(base_name), base_name);
 
+  for (size_t i = 0; i < route_count; i++) {
+    size_t index = 0; // Will be set by match_name(), then unused
     if (match_name(name, loading_table[i].pattern, &index)) {
       loading_table[i].loader(safetensors, tensor, index, weights);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Return true if a QK Norm tensor is present
+static bool has_qk_norm(safetensors_t* t) {
+  for (size_t i = 0; i < t->tensor_count; i++) {
+    // Get tensor's normalized name
+    char base_name[SAFETENSORS_MAX_STRING];
+    const char* name =
+        normalize_name(t->tensor[i].name, sizeof(base_name), base_name);
+    size_t index = 0; // Will be set by match_name(), then unused
+    if (match_name(name, SAFETENSORS_PATTERN_MHA_Q_NORM_WEIGHT, &index)) {
       return true;
     }
   }
@@ -547,6 +671,7 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   size_t embedding_len = t->vocabulary_len * t->embedding_dim;
   size_t mha_norm_len = t->layer_count * t->embedding_dim;
   size_t mha_q_len = t->layer_count * t->q_head_count * qkv_weight_dim;
+  size_t mha_qk_norm_len = t->layer_count * t->head_dim;
   size_t mha_kv_len = t->layer_count * t->kv_head_count * qkv_weight_dim;
   size_t mha_out_dim = t->q_head_count * t->head_dim;
   size_t mha_out_len = t->layer_count * t->embedding_dim * mha_out_dim;
@@ -560,6 +685,7 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   size_t embedding_size = embedding_len * sizeof(*w->embedding_weight);
   size_t mha_norm_size = mha_norm_len * sizeof(*w->mha_norm_weight);
   size_t mha_q_size = mha_q_len * sizeof(*w->mha_q_weight);
+  size_t mha_qk_norm_size = mha_qk_norm_len * sizeof(*w->mha_q_norm_weight);
   size_t mha_kv_size = mha_kv_len * sizeof(*w->mha_k_weight);
   size_t mha_out_size = mha_out_len * sizeof(*w->mha_out_weight);
   size_t ffn_norm_size = ffn_norm_len * sizeof(*w->ffn_norm_weight);
@@ -586,6 +712,11 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   } else {
     w->out_weight = aligned_alloc(UTIL_ALIGNMENT, out_size);
   }
+  bool qk_normalization = has_qk_norm(t);
+  if (qk_normalization) {
+    w->mha_q_norm_weight = aligned_alloc(UTIL_ALIGNMENT, mha_qk_norm_size);
+    w->mha_k_norm_weight = aligned_alloc(UTIL_ALIGNMENT, mha_qk_norm_size);
+  }
 
   // Ensure all mallocs went fine
   if (!w->embedding_weight ||
@@ -599,7 +730,9 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
       !w->ffn_up_weight ||
       !w->ffn_out_weight ||
       !w->out_norm_weight ||
-      (!w->out_weight && !is_out_weigth_aliased)) {
+      (!w->out_weight && !is_out_weigth_aliased) ||
+      (qk_normalization && !w->mha_q_norm_weight) ||
+      (qk_normalization && !w->mha_k_norm_weight)) {
     UTIL_DIE("failed to malloc for weights");
   }
 
@@ -640,7 +773,9 @@ void transformer_free(transformer_t* transformer) {
   free(w->embedding_weight);
   free(w->mha_norm_weight);
   free(w->mha_q_weight);
+  free(w->mha_q_norm_weight);
   free(w->mha_k_weight);
+  free(w->mha_k_norm_weight);
   free(w->mha_v_weight);
   free(w->mha_out_weight);
   free(w->ffn_norm_weight);
@@ -702,6 +837,7 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   size_t embedding_len = c->vocabulary_len * c->embedding_dim;
   size_t mha_norm_len = c->layer_count * c->embedding_dim;
   size_t mha_q_len = c->layer_count * c->q_head_count * qkv_weight_dim;
+  size_t mha_qk_norm_len = c->layer_count * c->head_dim;
   size_t mha_kv_len = c->layer_count * c->kv_head_count * qkv_weight_dim;
   size_t mha_out_dim = c->q_head_count * c->head_dim;
   size_t mha_out_len = c->layer_count * c->embedding_dim * mha_out_dim;
@@ -717,7 +853,9 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   double embedding_gb = (embedding_len * sizeof(*w->embedding_weight)) / gb;
   double mha_norm_gb = (mha_norm_len * sizeof(*w->mha_norm_weight)) / gb;
   double mha_q_gb = (mha_q_len * sizeof(*w->mha_q_weight)) / gb;
+  double mha_q_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_q_norm_weight)) / gb;
   double mha_k_gb = (mha_kv_len * sizeof(*w->mha_k_weight)) / gb;
+  double mha_k_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_k_norm_weight)) / gb;
   double mha_v_gb = (mha_kv_len * sizeof(*w->mha_v_weight)) / gb;
   double mha_out_gb = (mha_out_len * sizeof(*w->mha_out_weight)) / gb;
   double ffn_norm_gb = (ffn_norm_len * sizeof(*w->ffn_norm_weight)) / gb;
@@ -734,43 +872,53 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
 
   fprintf(f, "- Weights (%.2f GB):\n", total_gb);
   char s[SAFETENSORS_MAX_STRING];
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "embedding", embedding_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "embedding", embedding_gb);
   util_matrix_summary(s, 1, embedding_len, 3, w->embedding_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_norm", mha_norm_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_norm", mha_norm_gb);
   util_matrix_summary(s, 1, mha_norm_len, 3, w->mha_norm_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_q", mha_q_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q", mha_q_gb);
   util_matrix_summary(s, 1, mha_q_len, 3, w->mha_q_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_k", mha_k_gb);
+  if (w->mha_q_norm_weight) {
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q_norm", mha_q_norm_gb);
+    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_q_norm_weight);
+  }
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k", mha_k_gb);
   util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_v", mha_v_gb);
+  if (w->mha_k_norm_weight) {
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k_norm", mha_k_norm_gb);
+    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_k_norm_weight);
+  }
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_v", mha_v_gb);
   util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "mha_out", mha_out_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_out", mha_out_gb);
   util_matrix_summary(s, 1, mha_out_len, 3, w->mha_out_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "ffn_norm", ffn_norm_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_norm", ffn_norm_gb);
   util_matrix_summary(s, 1, ffn_norm_len, 3, w->ffn_norm_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "ffn_fc", ffn_fc_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_fc", ffn_fc_gb);
   util_matrix_summary(s, 1, ffn_fc_len, 3, w->ffn_fc_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "ffn_up", ffn_up_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_up", ffn_up_gb);
   util_matrix_summary(s, 1, ffn_up_len, 3, w->ffn_up_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "ffn_out", ffn_out_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_out", ffn_out_gb);
   util_matrix_summary(s, 1, ffn_out_len, 3, w->ffn_out_weight);
 
-  snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "out_norm", out_norm_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "out_norm", out_norm_gb);
   util_matrix_summary(s, 1, out_norm_len, 3, w->out_norm_weight);
 
   if (c->aliased_out_weight) {
-    fprintf(f, "--- %9s (%7.4f GB): alias to embedding\n", "out", 0.);
+    fprintf(f, "--- %10s (%7.4f GB): alias to embedding\n", "out", 0.);
   } else {
-    snprintf(s, sizeof(s), "--- %9s (%7.4f GB)", "out", out_gb);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "out", out_gb);
     util_matrix_summary(s, 1, out_len, 3, w->out_weight);
   }
 }
@@ -1027,8 +1175,10 @@ static void transformer_predict_chunk(
     uint16_t mha_norm_weight[restrict layer_count][embedding_dim],
     uint16_t mha_q_weight[restrict layer_count][kv_head_count]
                          [q_head_per_kv_head_count][head_dim][embedding_dim],
+    uint16_t mha_q_norm_weight[restrict layer_count][head_dim],
     uint16_t mha_k_weight[restrict layer_count][kv_head_count][head_dim]
                          [embedding_dim],
+    uint16_t mha_k_norm_weight[restrict layer_count][head_dim],
     uint16_t mha_v_weight[restrict layer_count][kv_head_count][head_dim]
                          [embedding_dim],
     uint16_t mha_out_weight[restrict layer_count][embedding_dim]
@@ -1130,6 +1280,21 @@ static void transformer_predict_chunk(
       }
     }
 
+    if (mha_q_norm_weight) {
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          rmsnorm(
+              token_count,
+              head_dim,
+              mha_q[k][q],
+              mha_q[k][q],
+              mha_q_norm_weight[l],
+              epsilon
+          );
+        }
+      }
+    }
+
     // RoPE K for all KV-heads: complex-valued rotate K in each head
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t t = 0; t < token_count; t++) {
@@ -1141,6 +1306,19 @@ static void transformer_predict_chunk(
           k_cache[l][k][cached_count + t][h + 0] = v0 * fr - v1 * fi;
           k_cache[l][k][cached_count + t][h + 1] = v0 * fi + v1 * fr;
         }
+      }
+    }
+
+    if (mha_k_norm_weight) {
+      for (size_t k = 0; k < kv_head_count; k++) {
+        rmsnorm(
+            token_count,
+            head_dim,
+            k_cache[l][k] + cached_count,
+            k_cache[l][k] + cached_count,
+            mha_k_norm_weight[l],
+            epsilon
+        );
       }
     }
 
@@ -1371,7 +1549,9 @@ void transformer_predict(
         (uint16_t (*)[embedding_dim])w->mha_norm_weight,
         (uint16_t (*)[kv_head_count][q_head_per_kv_head_count][head_dim]
                      [embedding_dim])w->mha_q_weight,
+        (uint16_t (*)[head_dim])w->mha_q_norm_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_k_weight,
+        (uint16_t (*)[head_dim])w->mha_k_norm_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_v_weight,
         (uint16_t (*)[embedding_dim][q_head_count * head_dim])w->mha_out_weight,
         (uint16_t (*)[embedding_dim])w->ffn_norm_weight,
