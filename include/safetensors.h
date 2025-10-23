@@ -26,10 +26,11 @@ struct options;
 #define SAFETENSORS_PATTERN_OUT_NORM_WEIGHT   "model.norm.weight"
 #define SAFETENSORS_PATTERN_OUT_WEIGHT        "lm_head.weight"
 
-#define SAFETENSORS_MAX_FILE_COUNT   64
-#define SAFETENSORS_MAX_DIM_COUNT    8
-#define SAFETENSORS_MAX_TENSOR_COUNT 65536
-#define SAFETENSORS_MAX_STRING       1024
+#define SAFETENSORS_MAX_FILE_COUNT          64
+#define SAFETENSORS_MAX_DIM_COUNT           8
+#define SAFETENSORS_MAX_MROPE_SECTION_COUNT 8
+#define SAFETENSORS_MAX_TENSOR_COUNT        65536
+#define SAFETENSORS_MAX_STRING              1024
 
 typedef enum {
   SAFETENSORS_TYPE_F16,  // IEEE float16 (half precision)
@@ -60,6 +61,8 @@ typedef struct safetensors{
   size_t vocabulary_len; // Vocabulary size
   size_t context_len;    // Maximum sequence length
   float  rope_theta;     // RoPE base frequency
+  size_t mrope_section_count; // Sections for multi-scale RoPE (0 if none)
+  size_t mrope_section[SAFETENSORS_MAX_MROPE_SECTION_COUNT];
 
   // Special tokens from the configuration file
   int bos_token_id;      // Beginning of string token id

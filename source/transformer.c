@@ -17,7 +17,7 @@
 static transformer_configuration_t* configuration_from_safetensors(
     safetensors_t* safetensors
 ) {
-  transformer_configuration_t* config = malloc(sizeof(*config));
+  transformer_configuration_t* config = calloc(1, sizeof(*config));
   if (config == NULL) {
     UTIL_DIE("failed to malloc for transformer_configuration_t");
   }
@@ -30,6 +30,19 @@ static transformer_configuration_t* configuration_from_safetensors(
   config->vocabulary_len = safetensors->vocabulary_len;
   config->context_len = safetensors->context_len;
   config->rope_theta = safetensors->rope_theta;
+  config->mrope_section_count = safetensors->mrope_section_count;
+  if (config->mrope_section_count > 0) {
+    size_t size = config->mrope_section_count * sizeof(*config->mrope_section);
+    config->mrope_section = calloc(1, size);
+    if (config->mrope_section == NULL) {
+      UTIL_DIE("failed to malloc for mrope_section");
+    }
+    for (size_t i = 0; i < config->mrope_section_count; i++) {
+      config->mrope_section[i] = safetensors->mrope_section[i];
+    }
+  } else {
+    config->mrope_section = NULL;
+  }
   config->aliased_out_weight = safetensors_aliased_out_weight(safetensors);
   return config;
 }
@@ -100,13 +113,43 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   }
 
   // Initialize RoPE cosine and sine values
-  for (size_t i = 0; i < t->context_len; i++) {
-    for (size_t j = 0; j < t->head_dim; j += 2) {
-      float freq = 1.0f / powf(t->rope_theta, j / (float)t->head_dim);
-      float val = i * freq;
-      s->rope_cos_sin[i * t->head_dim + j] = cosf(val);
-      s->rope_cos_sin[i * t->head_dim + j + 1] = sinf(val);
+  if (t->mrope_section_count == 0) {
+    for (size_t i = 0; i < t->context_len; i++) {
+      for (size_t j = 0; j < t->head_dim; j += 2) {
+        float freq = 1.0f / powf(t->rope_theta, j / (float)t->head_dim);
+        float val = i * freq;
+        s->rope_cos_sin[i * t->head_dim + j] = cosf(val);
+        s->rope_cos_sin[i * t->head_dim + j + 1] = sinf(val);
+      }
     }
+  } else {
+    UTIL_DIE("TODO");
+    /*size_t section_offsets[SAFETENSORS_MAX_MROPE_SECTION_COUNT]; // num_sections + 1
+    section_offsets[0] = t->mrope_section[0];
+    for (size_t section = 0; section < t->mrope_section_count; section++) {
+      section_offsets[section + 1] = section_offsets[section] + t->mrope_section[section];
+    }
+
+    // Precompute RoPE for each section
+    for (size_t i = 0; i < t->context_len; i++) {
+      size_t section_start = 0;
+      size_t section_size = 0;
+
+      for (size_t section = 0; section < t->mrope_section_count; section++) {
+
+
+        for (size_t j = 0; j < section_size; j++) {
+          // Key change: denominator is 2 * section_size, not head_dim
+          float freq =
+              1.0f / powf(t->rope_theta, (2.0f * j) / (2.0f * section_size));
+          float val = i * freq;
+
+          size_t dim_idx = section_start + j;
+          s->rope_cos_sin[i * t->head_dim + dim_idx * 2] = cosf(val);
+          s->rope_cos_sin[i * t->head_dim + dim_idx * 2 + 1] = sinf(val);
+        }
+      }
+    }*/
   }
 
   return s;
@@ -804,6 +847,7 @@ void transformer_free(transformer_t* transformer) {
   free(s->rope_cos_sin);
   free(s);
 
+  free(c->mrope_section);
   free(c);
 
   free(transformer);
@@ -829,6 +873,20 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   fprintf(f, "--- vocabulary_len:     %zu\n", c->vocabulary_len);
   fprintf(f, "--- context_len:        %zu\n", c->context_len);
   fprintf(f, "--- rope_theta:         %.1f\n", c->rope_theta);
+  fprintf(f, "--- mrope_sections:     ");
+  if (c->mrope_section_count == 0) {
+    fprintf(f, "none\n");
+  } else {
+    fprintf(f, "[");
+    for (size_t i = 0; i < c->mrope_section_count; i++) {
+      fprintf(f, "%zu", c->mrope_section[i]);
+      if (i == c->mrope_section_count - 1) {
+        fprintf(f, "]\n");
+      } else {
+        fprintf(f, ", ");
+      }
+    }
+  }
   char* aliased_out = c->aliased_out_weight ? "true" : "false";
   fprintf(f, "--- aliased_out_weight: %s\n", aliased_out);
 

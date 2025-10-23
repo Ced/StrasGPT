@@ -50,7 +50,8 @@
 %token NULL_ TYPE SHAPE OFFSET METADATA TEXT_CONFIG WEIGHT_MAP
 %token BOS_TOKEN_ID EOS_TOKEN_ID
 %token EMBEDDING_DIM HEAD_DIM HIDDEN_DIM LAYER_COUNT Q_HEAD_COUNT KV_HEAD_COUNT
-%token VOCABULARY_LEN CONTEXT_LEN ROPE_THETA MODEL VOCAB
+%token VOCABULARY_LEN CONTEXT_LEN MODEL VOCAB
+%token ROPE_THETA ROPE_SCALING MROPE_SECTION
 %token MODE_CONFIG MODE_INDEX MODE_SAFETENSORS MODE_TOKENIZER
 %start entry
 
@@ -162,6 +163,7 @@ config_member
     {
       parser_safetensors->rope_theta = $3.fval;
     }
+  | ROPE_SCALING ':' '{' rope_scaling_member_list '}'
   | TYPE ':' STRING
     {
       free($3);
@@ -178,6 +180,52 @@ config_member
     {
       free($1);
       json_scanner_leave_kw_as_string_mode();
+    }
+  ;
+
+rope_scaling_member_list
+  : rope_scaling_member_list ',' rope_scaling_member
+  | rope_scaling_member
+  ;
+
+rope_scaling_member
+  : MROPE_SECTION ':' '[' mrope_section_list ']'
+  | STRING ':' json_value
+    {
+      free($1);
+    }
+
+mrope_section_list
+  : mrope_section_list ',' NUMBER
+    {
+      if (!$3.is_int) {
+        yyerror("non integer mrope section value");
+        YYABORT;
+      }
+      if (parser_safetensors->mrope_section_count >=
+          SAFETENSORS_MAX_MROPE_SECTION_COUNT) {
+        yyerror("too many mrope sections");
+        YYABORT;
+      }
+      parser_safetensors
+          ->mrope_section[parser_safetensors->mrope_section_count] = $3.ival;
+      parser_safetensors->mrope_section_count++;
+
+    }
+  | NUMBER
+    {
+      if (!$1.is_int) {
+        yyerror("non integer mrope section value");
+        YYABORT;
+      }
+      if (parser_safetensors->mrope_section_count >=
+          SAFETENSORS_MAX_MROPE_SECTION_COUNT) {
+        yyerror("too many mrope sections");
+        YYABORT;
+      }
+      parser_safetensors
+          ->mrope_section[parser_safetensors->mrope_section_count] = $1.ival;
+      parser_safetensors->mrope_section_count++;
     }
   ;
 

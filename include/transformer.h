@@ -19,6 +19,8 @@ typedef struct transformer_configuration {
   size_t context_len;      // Maximum sequence length
   float  rope_theta;       // RoPE base frequency
   bool aliased_out_weight; // True if out_weight is aliased to embedding_weight
+  size_t mrope_section_count; // Number of multi-scale RoPE section (0 if none)
+  size_t* mrope_section;   // Sections for multi-scale RoPE (NULL if none)
 } transformer_configuration_t;
 
 typedef struct transformer_weights {

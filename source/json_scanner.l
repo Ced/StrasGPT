@@ -41,6 +41,8 @@ kv_head_count  \"num_key_value_heads\"
 vocabulary_len \"vocab_size\"
 context_len    \"max_position_embeddings\"
 rope_theta     \"rope_theta\"
+rope_scaling   \"rope_scaling\"
+mrope_section  \"mrope_section\"
 model          \"model\"
 vocab          \"vocab\"
 
@@ -157,6 +159,16 @@ null           null
 <INITIAL>{rope_theta} {
   dump("rope_theta", yytext);
   return ROPE_THETA;
+}
+
+<INITIAL>{rope_scaling} {
+  dump("rope_scaling", yytext);
+  return ROPE_SCALING;
+}
+
+<INITIAL>{mrope_section} {
+  dump("mrope_section", yytext);
+  return MROPE_SECTION;
 }
 
 <INITIAL>{model} {
