@@ -123,30 +123,59 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
       }
     }
   } else {
-    UTIL_DIE("TODO");
-    /*size_t section_offsets[SAFETENSORS_MAX_MROPE_SECTION_COUNT]; // num_sections + 1
-    section_offsets[0] = t->mrope_section[0];
-    for (size_t section = 0; section < t->mrope_section_count; section++) {
-      section_offsets[section + 1] = section_offsets[section] + t->mrope_section[section];
+    //UTIL_DIE("TODO");
+    // Calculate section offsets
+    size_t section_offsets[4];
+    section_offsets[0] = 0;
+    for (size_t sec = 0; sec < t->mrope_section_count; sec++) {
+      section_offsets[sec + 1] = section_offsets[sec] + t->mrope_section[sec];
     }
 
     // Precompute RoPE for each section
     for (size_t i = 0; i < t->context_len; i++) {
-      size_t section_start = 0;
-      size_t section_size = 0;
-
-      for (size_t section = 0; section < t->mrope_section_count; section++) {
-
+      for (size_t sec = 0; sec < t->mrope_section_count; sec++) {
+        size_t section_start = section_offsets[sec];
+        size_t section_size = t->mrope_section[sec];
 
         for (size_t j = 0; j < section_size; j++) {
-          // Key change: denominator is 2 * section_size, not head_dim
+          // Key: denominator is 2 * section_size, not head_dim
           float freq =
               1.0f / powf(t->rope_theta, (2.0f * j) / (2.0f * section_size));
-          float val = i * freq;
+          float val = i * freq; // i is the token position
 
           size_t dim_idx = section_start + j;
           s->rope_cos_sin[i * t->head_dim + dim_idx * 2] = cosf(val);
           s->rope_cos_sin[i * t->head_dim + dim_idx * 2 + 1] = sinf(val);
+        }
+      }
+    }
+
+    // Calculate section offsets
+    /*int section_offsets[4];
+    section_offsets[0] = 0;
+    for (int sec = 0; sec < t->mrope_section_count; sec++) {
+      section_offsets[sec + 1] = section_offsets[sec] + t->mrope_section[sec];
+    }
+
+    // Layout: [pos0_dim0_real, pos0_dim1_real, ..., pos0_dimN_real,
+    //          pos0_dim0_imag, pos0_dim1_imag, ..., pos0_dimN_imag,
+    //          pos1_dim0_real, pos1_dim1_real, ...]
+    int half_head = t->head_dim / 2;
+
+    for (size_t i = 0; i < t->context_len; i++) {
+      for (int sec = 0; sec < t->mrope_section_count; sec++) {
+        int section_start = section_offsets[sec];
+        int section_size = t->mrope_section[sec];
+
+        for (int j = 0; j < section_size; j++) {
+          float freq =
+              1.0f / powf(t->rope_theta, (2.0f * j) / (2.0f * section_size));
+          float val = i * freq;
+
+          int dim_idx = section_start + j;
+          s->rope_cos_sin[i * t->head_dim + dim_idx] = cosf(val); // real part
+          s->rope_cos_sin[i * t->head_dim + half_head + dim_idx] =
+              sinf(val); // imaginary part
         }
       }
     }*/
@@ -340,12 +369,12 @@ static void load_mha_q_weight(
   );
 
   // Permute the weight from Hugging Face layout to Meta layout
-  permute_hf_to_meta(
+  /*permute_hf_to_meta(
       safetensors->q_head_count * safetensors->head_dim,
       safetensors->embedding_dim,
       safetensors->q_head_count,
       &weights->mha_q_weight[index * len]
-  );
+  );*/
 }
 
 static void load_mha_q_norm_weight(
@@ -391,12 +420,12 @@ static void load_mha_k_weight(
   );
 
   // Permute the weight from Hugging Face layout to Meta layout
-  permute_hf_to_meta(
+  /*permute_hf_to_meta(
       safetensors->kv_head_count * safetensors->head_dim,
       safetensors->embedding_dim,
       safetensors->kv_head_count,
       &weights->mha_k_weight[index * len]
-  );
+  );*/
 }
 
 static void load_mha_k_norm_weight(
@@ -1337,6 +1366,23 @@ static void transformer_predict_chunk(
         }
       }
     }
+    /*int half_head = head_dim / 2;
+    for (size_t k = 0; k < kv_head_count; k++) {
+      for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+        for (size_t t = 0; t < token_count; t++) {
+          for (size_t h = 0; h < half_head; h++) {
+            float fr = rope_cos_sin[cached_count + t][h];      // real part
+            float fi =
+                rope_cos_sin[cached_count + t][half_head + h]; // imaginary part
+            float v0 = mha_q[k][q][t][h];                      // real part
+            float v1 = mha_q[k][q][t][half_head + h];          // imaginary part
+
+            mha_q[k][q][t][h] = v0 * fr - v1 * fi;
+            mha_q[k][q][t][half_head + h] = v0 * fi + v1 * fr;
+          }
+        }
+      }
+    }*/
 
     if (mha_q_norm_weight) {
       for (size_t k = 0; k < kv_head_count; k++) {
@@ -1366,6 +1412,19 @@ static void transformer_predict_chunk(
         }
       }
     }
+
+    /*for (size_t k = 0; k < kv_head_count; k++) {
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t h = 0; h < half_head; h++) {
+          float fr = rope_cos_sin[cached_count + t][h];       // real part
+          float fi = rope_cos_sin[cached_count + t][half_head + h];  // imaginary part
+          float v0 = k_cache[l][k][cached_count + t][h];      // real part
+          float v1 = k_cache[l][k][cached_count + t][half_head + h]; // imaginary part
+          k_cache[l][k][cached_count + t][h] = v0 * fr - v1 * fi;
+          k_cache[l][k][cached_count + t][half_head + h] = v0 * fi + v1 * fr;
+        }
+      }
+    }*/
 
     if (mha_k_norm_weight) {
       for (size_t k = 0; k < kv_head_count; k++) {
