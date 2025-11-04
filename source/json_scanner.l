@@ -6,7 +6,7 @@
   #include <stdbool.h>
   #include <stdlib.h>
   #include <string.h>
-  size_t json_scanner_line_count = 0;
+  size_t json_scanner_line_count = 1;
   void dump(char*, char*);
 %}
 
