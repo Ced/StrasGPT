@@ -4,8 +4,11 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#define SAMPLER_DEBUG_TOP_TOKENS 10
+
 struct options;
 struct transformer;
+struct tokenizer;
 
 typedef struct {
   float probability;
@@ -13,6 +16,9 @@ typedef struct {
 } sampler_probability_index_t;
 
 typedef struct {
+  #ifdef DEBUG
+  struct tokenizer* tokenizer; // Not controlled by sampler (for debug prints)
+  #endif
   size_t vocabulary_len;
   float temperature;
   float top_p;

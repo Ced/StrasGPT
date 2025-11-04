@@ -125,6 +125,9 @@ int main(int argc, char* argv[]) {
   sampler_t* sampler = sampler_build(options, transformer);
   sampler_print(stderr, sampler);
   fprintf(stderr, "\n");
+  #ifdef DEBUG
+  sampler->tokenizer = tokenizer; // For debug prints
+  #endif
 
   // Get the prompt, either from file or command line argument
   char* prompt = NULL;

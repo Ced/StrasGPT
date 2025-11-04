@@ -1252,6 +1252,9 @@ static void transformer_predict_chunk(
       size_t att_len = token_count * q_head_count * head_dim;
       size_t hidden_len = token_count * hidden_dim;
       size_t score_len = q_head_count * token_count * context_len;
+      if (l == 0) {
+        fprintf(stderr, "\n\n");
+      }
       fprintf(stderr, "Transformer state at layer %zu:\n", l);
       util_matrix_summary("- embedding", 1, mha_len, 3, (float*)embedding);
       util_matrix_summary("-  mha_norm", 1, mha_len, 3, (float*)mha_norm);

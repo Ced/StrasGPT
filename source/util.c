@@ -193,8 +193,8 @@ void util_matrix_summary_bf16(
         sum += val; \
       } \
       double mean = sum / (double)total; \
-      fprintf(stderr, "min=%6.3f max=%6.3f ", min, max); \
-      fprintf(stderr, "mean=%6.3f sum=%6.3f\n", mean, sum); \
+      fprintf(stderr, "min=%8.3f max=%8.3f ", min, max); \
+      fprintf(stderr, "mean=%8.3f sum=%8.3f\n", mean, sum); \
     }
 
 DEFINE_UTIL_MATRIX_SUMMARY(float, util_matrix_summary_fp32)

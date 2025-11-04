@@ -2,6 +2,9 @@
 #include "options.h"
 #include "transformer.h"
 #include "util.h"
+#ifdef DEBUG
+#include "tokenizer.h"
+#endif
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -186,12 +189,55 @@ size_t sampler_sample(sampler_t* sampler, float* logits) {
     // Greedy argmax sampling: take the token with the highest probability
     next = sample_argmax(logits, sampler->vocabulary_len);
   } else {
+    #ifdef DEBUG
+    // Print logits summary
+    fprintf(stderr, "Transformer output:\n");
+    util_matrix_summary("-    logits", 1, sampler->vocabulary_len, 3, logits);
+    #endif
+
     // Apply the temperature to the logits
     for (size_t q = 0; q < sampler->vocabulary_len; q++) {
       logits[q] /= sampler->temperature;
     }
     // Apply softmax to the logits to get the probabilities for next token
     softmax(sampler->vocabulary_len, logits);
+
+    #ifdef DEBUG
+    // Print top tokens with highest probability
+    sampler_probability_index_t top[SAMPLER_DEBUG_TOP_TOKENS];
+    for (size_t i = 0; i < SAMPLER_DEBUG_TOP_TOKENS; i++) {
+      top[i].index = 0;
+      top[i].probability = -1.0f;
+    }
+    // Find top by simple linear search
+    for (size_t i = 0; i < sampler->vocabulary_len; i++) {
+      float prob = logits[i];
+      // Check if this probability is in top
+      for (size_t j = 0; j < SAMPLER_DEBUG_TOP_TOKENS; j++) {
+        if (prob > top[j].probability) {
+          // Shift lower probabilities down
+          for (size_t k = SAMPLER_DEBUG_TOP_TOKENS - 1; k > j; k--) {
+            top[k] = top[k - 1];
+          }
+          top[j].index = i;
+          top[j].probability = prob;
+          break;
+        }
+      }
+    }
+    fprintf(stderr, "\nTop%d tokens:\n", SAMPLER_DEBUG_TOP_TOKENS);
+    for (size_t i = 0; i < SAMPLER_DEBUG_TOP_TOKENS; i++) {
+      fprintf(
+          stderr,
+          "- %2zu token=%6zu probability=%7.4f text=\"%s\"\n",
+          i + 1,
+          top[i].index,
+          top[i].probability,
+          tokenizer_decode(sampler->tokenizer, top[i].index)
+      );
+    }
+    #endif
+
     // Flip a (float) coin (this is our source of entropy for sampling)
     float coin = random_f32(&sampler->rng_state);
     // We sample from this distribution to get the next token
