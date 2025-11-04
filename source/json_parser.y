@@ -360,6 +360,10 @@ tokenizer_vocab_member
   : STRING ':' NUMBER
     {
       size_t i = parser_tokenizer->token_string_count;
+      if (i >= TOKENIZER_MAX_TOKEN_STRING) {
+        yyerror("too many token strings");
+        YYABORT;
+      }
       parser_tokenizer->token_string[i] = $1;
       parser_tokenizer->score[i] = (float)$3.fval;
       parser_tokenizer->token_string_count++;
