@@ -1323,7 +1323,7 @@ static void transformer_predict_chunk(
   );
 
   // Classifier into logits
-  #pragma omp single
+  #pragma omp for collapse(2)
   for (size_t l = 0; l < logits_count; l++) {
     for (size_t v = 0; v < vocabulary_len; v++) {
       logits[l][v] =
