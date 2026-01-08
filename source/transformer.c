@@ -826,7 +826,7 @@ static void rmsnorm(
 // converts a vector of real numbers into a probability distribution
 // where each value is in the range ]0, 1[ and the sum is 1, such that
 // larger input values correspond to larger output probabilities.
-static void softmax(
+void softmax(
     size_t sequence_len,
     size_t past,
     size_t context_len,
