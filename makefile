@@ -6,7 +6,7 @@ YACC    = yacc
 # Flags
 INC_DIR = include
 WFLAGS  = -Wall -Wextra -Wpedantic -Wno-unknown-pragmas
-OFLAGS  = -O2 -march=native
+OFLAGS  = -O3 -march=native -ffast-math
 CFLAGS  = $(OFLAGS) $(WFLAGS) -I$(INC_DIR)
 LDFLAGS = -lm
 EXEC    = strasgpt
