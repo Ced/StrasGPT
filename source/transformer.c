@@ -1431,8 +1431,8 @@ void transformer_predict(
         (float (*)[embedding_dim])s->mha_norm,
         (float (*)[q_head_per_kv_head_count][TRANSFORMER_CHUNK_MAX_LEN]
                   [head_dim])s->mha_q,
-        (float (*)[q_head_per_kv_head_count][context_len][context_len])
-            s->mha_score,
+        (float (*)[q_head_per_kv_head_count][TRANSFORMER_CHUNK_MAX_LEN]
+                  [context_len])s->mha_score,
         (float (*)[kv_head_count][q_head_per_kv_head_count][head_dim])
             s->mha_att,
         (float (*)[embedding_dim])s->mha_out,
