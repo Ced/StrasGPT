@@ -6,7 +6,7 @@
 
 struct safetensors;
 
-#define TRANSFORMER_CHUNK_MAX_LEN 512
+#define TRANSFORMER_CHUNK_MAX_LEN 256
 
 typedef struct transformer_configuration {
   size_t embedding_dim;    // Token representation (embedding) dimension
@@ -52,7 +52,7 @@ typedef struct transformer_state {
   float* mha_q;        // [kv_head_count][q_head_per_kv_head_count][
                        //  chunk_len][head_dim]
   float* mha_score;    // [kv_head_count][q_head_per_kv_head_count][
-                       //  chunk_len][context_len]
+                       //  chunk_len][chunk_len]
   float* mha_att;      // [chunk_len][kv_head_count][q_head_per_kv_head_count][
                        //  head_dim]
                        // also sees as [chunk_len][q_head_count * head_dim]

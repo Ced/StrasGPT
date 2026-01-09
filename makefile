@@ -1,5 +1,5 @@
 # Tools
-CC      = gcc
+CC      = clang
 LEX     = lex
 YACC    = yacc
 

@@ -2,6 +2,7 @@
 #include "transformer.h"
 #include "util.h"
 #include <ctype.h>
+#include <float.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -46,7 +47,7 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   size_t embedding_len = chunk_max_len * t->embedding_dim;
   size_t mha_att_len = chunk_max_len * t->q_head_count * t->head_dim;
   size_t hidden_len = chunk_max_len * t->hidden_dim;
-  size_t score_len = t->q_head_count * chunk_max_len * t->context_len;
+  size_t score_len = t->q_head_count * chunk_max_len * chunk_max_len;
   size_t cache_len = t->context_len * t->layer_count * kv_dim;
   size_t logits_len = chunk_max_len * t->vocabulary_len;
   size_t rope_len = t->context_len * t->head_dim;
@@ -1045,7 +1046,7 @@ static void transformer_predict_chunk(
     float mha_q[restrict kv_head_count][q_head_per_kv_head_count]
                [TRANSFORMER_CHUNK_MAX_LEN][head_dim],
     float mha_score[restrict kv_head_count][q_head_per_kv_head_count]
-                   [TRANSFORMER_CHUNK_MAX_LEN][context_len],
+                   [TRANSFORMER_CHUNK_MAX_LEN][TRANSFORMER_CHUNK_MAX_LEN],
     float mha_att[restrict TRANSFORMER_CHUNK_MAX_LEN][kv_head_count]
                  [q_head_per_kv_head_count][head_dim],
     float mha_out[restrict TRANSFORMER_CHUNK_MAX_LEN][embedding_dim],
@@ -1155,49 +1156,81 @@ static void transformer_predict_chunk(
     }
 
     // Multihead attention. iterate over all Q-heads
+    size_t chunk_len = TRANSFORMER_CHUNK_MAX_LEN;
     #pragma omp for collapse(3) schedule(static) nowait
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
         for (size_t t = 0; t < token_count; t++) {
-          // Calculate the attention score: QKˆT / sqrt(head_dim)
-          // Here we don't use mask but a triangular loop (no compute
-          // for future tokens)
-          for (size_t s = 0; s < cached_count + t + 1; s++) {
-            mha_score[k][q][t][s] = 0.0f;
-            for (size_t h = 0; h < head_dim; h++) {
-              mha_score[k][q][t][s] +=
-                  mha_q[k][q][t][h] * k_cache[l][k][s][h];
-            }
-            mha_score[k][q][t][s] /= sqrtf(head_dim);
-          }
+          float running_max = -FLT_MAX;
+          float running_sum = 0.0f;
 
-          // Softmax the scores to get attention weights
-          // - Find max value (for numerical stability)
-          float max = mha_score[k][q][t][0];
-          for (size_t s = 1; s < cached_count + t + 1; s++) {
-            max = (mha_score[k][q][t][s] > max) ? mha_score[k][q][t][s] : max;
-          }
-          // - Exp and sum
-          float sum = 0.0f;
-          for (size_t s = 0; s < cached_count + t + 1; s++) {
-            mha_score[k][q][t][s] = expf(mha_score[k][q][t][s] - max);
-            sum += mha_score[k][q][t][s];
-          }
-          // - Normalize
-          for (size_t s = 0; s < cached_count + t + 1; s++) {
-            mha_score[k][q][t][s] /= sum;
-          }
-
-          // Weighted sum of the values, here the access function of
-          // mha_att is to please the output matmul
+          // Initialize the attention output
           for (size_t h = 0; h < head_dim; h++) {
             mha_att[t][k][q][h] = 0.0f;
           }
-          for (size_t s = 0; s < cached_count + t + 1; s++) {
-            for (size_t h = 0; h < head_dim; h++) {
-              mha_att[t][k][q][h] +=
-                  mha_score[k][q][t][s] * v_cache[l][k][s][h];
+
+          // We use flash-attention chunking to avoid materializing the
+          // (huge) full score matrix in memory. We proceed chunk by chunk.
+          // Note here we don't use mask but a triangular loop (no compute
+          // for future tokens)
+          for (size_t s0 = 0; s0 < cached_count + t + 1; s0 += chunk_len) {
+            size_t s_bound = UTIL_MIN(s0 + chunk_len, cached_count + t + 1);
+            size_t s_count = s_bound - s0;
+
+            // Calculate the chunk's attention score: QKˆT / sqrt(head_dim)
+            for (size_t i = 0; i < s_count; i++) {
+              size_t s = s0 + i;
+              mha_score[k][q][t][i] = 0.0f;
+              for (size_t h = 0; h < head_dim; h++) {
+                mha_score[k][q][t][i] +=
+                    mha_q[k][q][t][h] * k_cache[l][k][s][h];
+              }
+              mha_score[k][q][t][i] /= sqrtf(head_dim);
             }
+
+            // Softmax the scores to get attention weights
+            // - Find max value for the chunk (for numerical stability)
+            float max = mha_score[k][q][t][0];
+            for (size_t i = 1; i < s_count; i++) {
+              max = (mha_score[k][q][t][i] > max) ? mha_score[k][q][t][i] : max;
+            }
+
+            // - Update running max/sum and rescale previous mha_att if needed
+            if (max > running_max) {
+              // Rescale current mha_att, if this is not the first chunk
+              // (main trick of flash attention)
+              if (s0 != 0) {
+                float rescale = expf(running_max - max);
+                running_sum *= rescale;
+                for (size_t h = 0; h < head_dim; h++) {
+                  mha_att[t][k][q][h] *= rescale;
+                }
+              }
+              running_max = max;
+            }
+
+            // - Exp for the current chunk and running sum update
+            for (size_t i = 0; i < s_count; i++) {
+              mha_score[k][q][t][i] = expf(mha_score[k][q][t][i] - running_max);
+              running_sum += mha_score[k][q][t][i];
+            }
+
+            // Weighted sum of the values for the current chunk are contributed
+            // to the global attention result. Note the access function of
+            // mha_att here is to please the output matmul
+            for (size_t i = 0; i < s_count; i++) {
+              size_t s = s0 + i;
+              for (size_t h = 0; h < head_dim; h++) {
+                mha_att[t][k][q][h] +=
+                    mha_score[k][q][t][i] * v_cache[l][k][s][h];
+              }
+            }
+          }
+
+          // Normalize the final attention output
+          float inv_sum = 1.0f / running_sum;
+          for (size_t h = 0; h < head_dim; h++) {
+            mha_att[t][k][q][h] *= inv_sum ;
           }
         }
       }
@@ -1292,7 +1325,7 @@ static void transformer_predict_chunk(
       size_t mha_len = token_count * embedding_dim;
       size_t att_len = token_count * q_head_count * head_dim;
       size_t hidden_len = token_count * hidden_dim;
-      size_t score_len = q_head_count * token_count * context_len;
+      size_t score_len = q_head_count * token_count * token_count;
       if (l == 0) {
         fprintf(stderr, "\n\n");
       }
