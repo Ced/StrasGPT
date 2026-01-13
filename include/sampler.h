@@ -21,6 +21,7 @@ typedef struct {
   #endif
   size_t vocabulary_len;
   float temperature;
+  size_t top_k;
   float top_p;
   unsigned long long rng_state;
   sampler_probability_index_t* probindex; // Buffer used in top-p sampling

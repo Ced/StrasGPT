@@ -18,6 +18,7 @@ options_t* options_malloc(void) {
   options->model_dir = OPTIONS_DEFAULT_MODEL_DIR;
   options->step_count = OPTIONS_DEFAULT_STEP_COUNT;
   options->thread_count = OPTIONS_DEFAULT_THREAD;
+  options->top_k = OPTIONS_DEFAULT_TOP_K;
   options->top_p = OPTIONS_DEFAULT_TOP_P;
   options->temperature = OPTIONS_DEFAULT_TEMPERATURE;
   options->seed_is_set = false;
@@ -48,6 +49,7 @@ void options_print(FILE* f, const options_t* options) {
   fprintf(f, "- model_dir:        %s\n", options->model_dir);
   fprintf(f, "- step_count:       %zu\n", options->step_count);
   fprintf(f, "- thread_count:     %zu\n", options->thread_count);
+  fprintf(f, "- top_k:            %zu\n", options->top_k);
   fprintf(f, "- top_p:            %.3f\n", options->top_p);
   fprintf(f, "- temperature:      %.3f\n", options->temperature);
   if (options->seed_is_set) {
@@ -79,6 +81,7 @@ void option_usage(char* argv[], int status) {
   fprintf(stderr, "  --show-safetensors show safetensors infos and exit\n");
   fprintf(stderr, "  -t <int>        set the number of threads (default 1)\n");
   fprintf(stderr, "  --temp <float>  temperature in [0, inf] (default 1.0)\n");
+  fprintf(stderr, "  --top-k <int>   top-k sampling (0: none, default 40)\n");
   fprintf(stderr, "  --top-p <float> top-p sampling in [0, 1] (default 0.9)\n");
   exit(status);
 }
@@ -159,6 +162,13 @@ options_t* options_read(int argc, char* argv[]) {
           options_free(options);
           option_usage(argv, EXIT_FAILURE);
         }
+      } else {
+        options_free(options);
+        option_usage(argv, EXIT_FAILURE);
+      }
+    } else if (strcmp(argv[i], "--top-k") == 0) {
+      if (i + 1 < arg_count) {
+        options->top_k = strtol(argv[i + 1], NULL, 10);
       } else {
         options_free(options);
         option_usage(argv, EXIT_FAILURE);

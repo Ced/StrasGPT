@@ -10,6 +10,7 @@
 #define OPTIONS_DEFAULT_MODEL_DIR     "."
 #define OPTIONS_DEFAULT_STEP_COUNT    256
 #define OPTIONS_DEFAULT_THREAD        1
+#define OPTIONS_DEFAULT_TOP_K         40
 #define OPTIONS_DEFAULT_TOP_P         0.9f
 #define OPTIONS_DEFAULT_TEMPERATURE   1.0f
 
@@ -20,6 +21,7 @@ typedef struct options {
   char* model_dir;
   size_t step_count;
   size_t thread_count;
+  size_t top_k;
   float top_p;
   float temperature;
   bool seed_is_set;

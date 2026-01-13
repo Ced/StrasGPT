@@ -19,10 +19,14 @@ sampler_t* sampler_build(options_t* options, transformer_t* transformer) {
 
   sampler_t* sampler = calloc(1, sizeof(sampler_t));
   if (!sampler) {
-    UTIL_DIE("failed to malloc for tokenizer_t");
+    UTIL_DIE("failed to malloc for sampler_t");
   }
+  #ifdef DEBUG
+  sampler->tokenizer = NULL;
+  #endif
   sampler->vocabulary_len = transformer->config->vocabulary_len;
   sampler->temperature = options->temperature;
+  sampler->top_k = options->top_k;
   sampler->top_p = options->top_p;
   sampler->rng_state = options->seed;
   if (options->seed <= 0) {
@@ -35,7 +39,7 @@ sampler_t* sampler_build(options_t* options, transformer_t* transformer) {
   sampler->probindex =
       calloc(sampler->vocabulary_len, sizeof(*sampler->probindex));
   if (!sampler->probindex) {
-    UTIL_DIE("failed to malloc for tokenizer_t");
+    UTIL_DIE("failed to malloc for probindex");
   }
   return sampler;
 }
@@ -57,8 +61,9 @@ void sampler_print(FILE* f, const sampler_t* sampler) {
   }
   fprintf(f, "Sampler:\n");
   fprintf(f, "- vocabulary_len: %zu\n", sampler->vocabulary_len);
-  fprintf(f, "- temperature:    %f\n", sampler->temperature);
+  fprintf(f, "- top_k:          %zu\n", sampler->top_k);
   fprintf(f, "- top_p:          %f\n", sampler->top_p);
+  fprintf(f, "- temperature:    %f\n", sampler->temperature);
   fprintf(f, "- rng_state:      %llu\n", sampler->rng_state);
 }
 
@@ -122,6 +127,30 @@ static size_t sample_mult(size_t len, float* probability, float coin) {
   return len - 1; // In case of rounding errors
 }
 
+// Renormalize probabilities to sum to 1 in place
+static void renormalize(size_t n, float* p) {
+  double sum = 0.0;
+
+  // Accumulate in double for numerical stability
+  for (size_t i = 0; i < n; i++) {
+    sum += (double)p[i];
+  }
+
+  // Fallback: uniform if everything was masked out
+  if (sum <= 0.0) {
+    const float u = 1.0f / (float)n;
+    for (size_t i = 0; i < n; i++) {
+      p[i] = u;
+    }
+    return;
+  }
+
+  const float inv_sum = (float)(1.0 / sum);
+  for (size_t i = 0; i < n; i++) {
+    p[i] *= inv_sum;
+  }
+}
+
 // Comparison function for qsort: descending order of probability
 static int compare(const void* a, const void* b) {
   sampler_probability_index_t* a_ = (sampler_probability_index_t*)a;
@@ -133,52 +162,63 @@ static int compare(const void* a, const void* b) {
   return 0;
 }
 
-// Top-p sampling (or "nucleus sampling") samples from the smallest set of
-// tokens that exceed probability top_p. This way we never sample tokens that
-// have very low probabilities and are less likely to go "off the rails".
-// coin is a random number in [0, 1[, usually from random_f32()
-static size_t sample_top_p(
+// Top-k filtering: keeps only the top-k most likely tokens
+static void filter_top_k(
+    size_t len,
+    float* probability,
+    size_t k,
+    sampler_probability_index_t* probindex
+) {
+  // Copy all probabilities with their indices
+  for (size_t i = 0; i < len; i++) {
+    probindex[i].index = i;
+    probindex[i].probability = probability[i];
+  }
+
+  // Sort by probability (descending order)
+  qsort(probindex, len, sizeof(*probindex), compare);
+
+  // Limit to top-k
+  size_t k_actual = k < len ? k : len;
+
+  // Zero out probabilities of tokens outside top-k
+  for (size_t i = k_actual; i < len; i++) {
+    probability[probindex[i].index] = 0.0f;
+  }
+}
+
+// Top-p filtering (or "nucleus sampling") filters to the smallest set of
+// tokens that exceed probability top_p.
+static void filter_top_p(
     size_t len,
     float* probability,
     float top_p,
-    sampler_probability_index_t* probindex,
-    float coin
+    sampler_probability_index_t* probindex
 ) {
-  size_t len0 = 0;
-  // Quicksort indices in descending order of probabilities
-  // values smaller than (1 - top_p) / (len - 1) cannot be part of the result
-  // so for efficiency we crop these out as candidates before sorting
-  const float cutoff = (1.0f - top_p) / (len - 1);
+  // Copy all probabilities with their indices
   for (size_t i = 0; i < len; i++) {
-    if (probability[i] >= cutoff) {
-      probindex[len0].index = i;
-      probindex[len0].probability = probability[i];
-      len0++;
-    }
+    probindex[i].index = i;
+    probindex[i].probability = probability[i];
   }
-  qsort(probindex, len0, sizeof(*probindex), compare);
+
+  // Sort by probability (descending order)
+  qsort(probindex, len, sizeof(*probindex), compare);
 
   // Truncate the list where cumulative probability exceeds topp
   float cumulative_prob = 0.0f;
-  size_t last_idx = len0 - 1; // If rounding errors consider all elements
-  for (size_t i = 0; i < len0; i++) {
+  size_t last_idx = len - 1; // If rounding errors consider all elements
+  for (size_t i = 0; i < len; i++) {
     cumulative_prob += probindex[i].probability;
-    if (cumulative_prob > top_p) {
+    if (cumulative_prob >= top_p) {
       last_idx = i;
       break; // We've exceeded top_p by including last_idx
     }
   }
 
-  // Sample from the truncated list
-  float r = coin * cumulative_prob;
-  float cdf = 0.0f;
-  for (size_t i = 0; i <= last_idx; i++) {
-    cdf += probindex[i].probability;
-    if (r < cdf) {
-      return probindex[i].index;
-    }
+  // Zero out probabilities of tokens outside top-p
+  for (size_t i = last_idx + 1; i < len; i++) {
+    probability[probindex[i].index] = 0.0f;
   }
-  return probindex[last_idx].index; // In case of rounding errors
 }
 
 // Sample the next token given the logits and some hyperparameters
@@ -229,31 +269,46 @@ size_t sampler_sample(sampler_t* sampler, float* logits) {
     for (size_t i = 0; i < SAMPLER_DEBUG_TOP_TOKENS; i++) {
       fprintf(
           stderr,
-          "- %2zu token=%6zu probability=%7.4f text=\"%s\"\n",
+          "- %2zu token=%6zu probability=%7.4f",
           i + 1,
           top[i].index,
-          top[i].probability,
-          tokenizer_decode(sampler->tokenizer, top[i].index)
+          top[i].probability
       );
+      if (sampler->tokenizer) {
+        fprintf(
+            stderr,
+            " text=\"%s\"",
+            tokenizer_decode(sampler->tokenizer, top[i].index)
+        );
+      }
+      fprintf(stderr, "\n");
     }
     #endif
 
     // Flip a (float) coin (this is our source of entropy for sampling)
     float coin = random_f32(&sampler->rng_state);
+
     // We sample from this distribution to get the next token
-    if (sampler->top_p <= 0 || sampler->top_p >= 1) {
-      // Simply sample from the predicted probability distribution
-      next = sample_mult(sampler->vocabulary_len, logits, coin);
-    } else {
-      // Top-p (nucleus) sampling, clamping the least likely tokens to zero
-      next = sample_top_p(
-          sampler->vocabulary_len,
-          logits,
-          sampler->top_p,
-          sampler->probindex,
-          coin
+    // Apply filters in sequence: top-k first, then top-p
+    if (sampler->top_k > 0) {
+      // First apply top-k filtering
+      filter_top_k(
+          sampler->vocabulary_len, logits, sampler->top_k, sampler->probindex
       );
     }
+
+    if (sampler->top_p > 0 && sampler->top_p <= 1) {
+      filter_top_p(
+          sampler->vocabulary_len, logits, sampler->top_p, sampler->probindex
+      );
+    }
+
+    // Renormalize the filtered probabilities
+    renormalize(sampler->vocabulary_len, logits);
+
+    // Sample from the normalized distribution
+    next = sample_mult(sampler->vocabulary_len, logits, coin);
   }
+
   return next;
 }
