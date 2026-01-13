@@ -201,8 +201,8 @@ int main(int argc, char* argv[]) {
     {
       end = time_in_ms();
       prefill_time = (end - start) / 1000.0;
-      // - Select the next token from the logits
-      predicted_token = sampler_sample(sampler, logits);
+      // - Select the next token from the logits (last token for penalty)
+      predicted_token = sampler_sample(sampler, logits, token[token_count - 1]);
       // - Decode the token into a string
       predicted_string = tokenizer_decode(tokenizer, predicted_token);
       // - Print the token string
@@ -222,7 +222,7 @@ int main(int argc, char* argv[]) {
         end = time_in_ms();
         decode_time += (end - start) / 1000.0;
 
-        predicted_token = sampler_sample(sampler, logits);
+        predicted_token = sampler_sample(sampler, logits, predicted_token);
         generated_count++;
         if (predicted_token != tokenizer->eos_token_id) {
           predicted_string = tokenizer_decode(tokenizer, predicted_token);

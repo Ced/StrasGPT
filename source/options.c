@@ -18,9 +18,10 @@ options_t* options_malloc(void) {
   options->model_dir = OPTIONS_DEFAULT_MODEL_DIR;
   options->step_count = OPTIONS_DEFAULT_STEP_COUNT;
   options->thread_count = OPTIONS_DEFAULT_THREAD;
+  options->presence_penalty = OPTIONS_DEFAULT_PRESENCE_PENALTY;
+  options->temperature = OPTIONS_DEFAULT_TEMPERATURE;
   options->top_k = OPTIONS_DEFAULT_TOP_K;
   options->top_p = OPTIONS_DEFAULT_TOP_P;
-  options->temperature = OPTIONS_DEFAULT_TEMPERATURE;
   options->seed_is_set = false;
   options->show_model = false;
   options->show_safetensors = false;
@@ -49,9 +50,10 @@ void options_print(FILE* f, const options_t* options) {
   fprintf(f, "- model_dir:        %s\n", options->model_dir);
   fprintf(f, "- step_count:       %zu\n", options->step_count);
   fprintf(f, "- thread_count:     %zu\n", options->thread_count);
+  fprintf(f, "- presence_penalty: %.3f\n", options->presence_penalty);
+  fprintf(f, "- temperature:      %.3f\n", options->temperature);
   fprintf(f, "- top_k:            %zu\n", options->top_k);
   fprintf(f, "- top_p:            %.3f\n", options->top_p);
-  fprintf(f, "- temperature:      %.3f\n", options->temperature);
   if (options->seed_is_set) {
     fprintf(f, "- seed:             %llu\n", options->seed);
   } else {
@@ -76,6 +78,8 @@ void option_usage(char* argv[], int status) {
   fprintf(stderr, "  -m <dir>        model directory (default ./)\n");
   fprintf(stderr, "  -n <int>        num of tokens to predict (default 256)\n");
   fprintf(stderr, "  -p <string>     input prompt\n");
+  fprintf(stderr, "  --presence-penalty <float> presence penalty in [0, 2]\n");
+  fprintf(stderr, "                  (default 0.0)\n");
   fprintf(stderr, "  -s <int>        random seed (default time(NULL))\n");
   fprintf(stderr, "  --show-model    show model infos and exit\n");
   fprintf(stderr, "  --show-safetensors show safetensors infos and exit\n");
@@ -125,6 +129,18 @@ options_t* options_read(int argc, char* argv[]) {
       if (i + 1 < arg_count) {
         options->prompt_string = argv[i + 1];
         options->use_prompt_file = false;
+      } else {
+        options_free(options);
+        option_usage(argv, EXIT_FAILURE);
+      }
+    } else if (strcmp(argv[i], "--presence-penalty") == 0) {
+      if (i + 1 < arg_count) {
+        options->presence_penalty = strtod(argv[i + 1], NULL);
+        if (options->presence_penalty < 0.0 ||
+            options->presence_penalty > 2.0) {
+          options_free(options);
+          option_usage(argv, EXIT_FAILURE);
+        }
       } else {
         options_free(options);
         option_usage(argv, EXIT_FAILURE);

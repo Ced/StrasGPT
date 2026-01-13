@@ -41,6 +41,12 @@ sampler_t* sampler_build(options_t* options, transformer_t* transformer) {
   if (!sampler->probindex) {
     UTIL_DIE("failed to malloc for probindex");
   }
+
+  // Token presence buffer for presence penalty
+  sampler->token_presence = calloc(sampler->vocabulary_len, sizeof(bool));
+  if (!sampler->token_presence) {
+    UTIL_DIE("failed to malloc for token_presence");
+  }
   return sampler;
 }
 
@@ -50,6 +56,7 @@ void sampler_free(sampler_t* sampler) {
     return;
   }
   free(sampler->probindex);
+  free(sampler->token_presence);
   free(sampler);
 }
 
@@ -60,11 +67,12 @@ void sampler_print(FILE* f, const sampler_t* sampler) {
     return;
   }
   fprintf(f, "Sampler:\n");
-  fprintf(f, "- vocabulary_len: %zu\n", sampler->vocabulary_len);
-  fprintf(f, "- top_k:          %zu\n", sampler->top_k);
-  fprintf(f, "- top_p:          %f\n", sampler->top_p);
-  fprintf(f, "- temperature:    %f\n", sampler->temperature);
-  fprintf(f, "- rng_state:      %llu\n", sampler->rng_state);
+  fprintf(f, "- vocabulary_len:   %zu\n", sampler->vocabulary_len);
+  fprintf(f, "- temperature:      %f\n", sampler->temperature);
+  fprintf(f, "- presence_penalty: %f\n", sampler->presence_penalty);
+  fprintf(f, "- top_k:            %zu\n", sampler->top_k);
+  fprintf(f, "- top_p:            %f\n", sampler->top_p);
+  fprintf(f, "- rng_state:        %llu\n", sampler->rng_state);
 }
 
 // Xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
@@ -222,7 +230,22 @@ static void filter_top_p(
 }
 
 // Sample the next token given the logits and some hyperparameters
-size_t sampler_sample(sampler_t* sampler, float* logits) {
+// Also provide the previous token to apply presence penalty
+size_t sampler_sample(sampler_t* sampler, float* logits, int token) {
+  // Mark the previous token as present (if valid)
+  if (token >= 0 && (size_t)token < sampler->vocabulary_len) {
+    sampler->token_presence[token] = true;
+  }
+
+  // Apply presence penalty to logits before any processing
+  if (sampler->presence_penalty != 0.0f) {
+    for (size_t i = 0; i < sampler->vocabulary_len; i++) {
+      if (sampler->token_presence[i]) {
+        logits[i] -= sampler->presence_penalty;
+      }
+    }
+  }
+
   // Sample the token given the logits and some hyperparameters
   size_t next;
   if (sampler->temperature == 0.0f) {
