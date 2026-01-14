@@ -1,8 +1,10 @@
 #include "util.h"
+#include <stdbool.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 // ----------------------------------------------------------------------------
 
@@ -201,3 +203,95 @@ DEFINE_UTIL_MATRIX_SUMMARY(float, util_matrix_summary_fp32)
 DEFINE_UTIL_MATRIX_SUMMARY(int8_t, util_matrix_summary_int8)
 
 // ----------------------------------------------------------------------------
+
+// util_parse_tokens:
+// ------------------
+// Parse a space-separated or comma-separated string of token IDs into an integer array.
+// The input string should contain whitespace and/or comma-separated integer token IDs.
+//
+// Parameters:
+// - input:        Input string containing space/comma-separated token IDs
+// - token_count:  Pointer to store the number of tokens parsed
+// - tokens:       Pointer to store the allocated array of token IDs
+// - add_bos:      If true, prepend BOS token to the token array
+// - bos_token_id: Token ID to use as BOS if add_bos is true
+//
+// Returns:
+// - void (exits on error via UTIL_DIE/UTIL_ERROR)
+//
+// Notes:
+// - The caller is responsible for freeing the allocated tokens array
+// - Accepts space, tab, newline, carriage return, and comma as separators
+
+void util_parse_tokens(
+    char* input,
+    size_t* token_count,
+    int** tokens,
+    bool add_bos,
+    int bos_token_id
+) {
+  if (input == NULL) {
+    UTIL_DIE("cannot parse NULL input");
+  }
+
+  // Make a copy of the input string for tokenization
+  char* input_copy = strdup(input);
+  if (!input_copy) {
+    UTIL_DIE("malloc failed for input_copy");
+  }
+
+  // First pass: count tokens
+  size_t parsed_count = 0;
+  char* saveptr;
+  char* tok = strtok_r(input_copy, " \t\n\r,", &saveptr);
+  while (tok != NULL) {
+    parsed_count++;
+    tok = strtok_r(NULL, " \t\n\r,", &saveptr);
+  }
+
+  if (parsed_count < 1) {
+    free(input_copy);
+    UTIL_ERROR("expected at least 1 token in pre-tokenized input");
+  }
+
+  // Calculate final token count (including optional BOS)
+  *token_count = parsed_count + (add_bos ? 1 : 0);
+
+  // Allocate token array
+  *tokens = malloc(*token_count * sizeof(int));
+  if (!*tokens) {
+    free(input_copy);
+    UTIL_DIE("malloc failed for tokens");
+  }
+
+  // Optionally add BOS token at the beginning
+  size_t idx = 0;
+  if (add_bos) {
+    (*tokens)[idx++] = bos_token_id;
+  }
+
+  // Make a fresh copy for second pass
+  free(input_copy);
+  input_copy = strdup(input);
+  if (!input_copy) {
+    free(*tokens);
+    UTIL_DIE("malloc failed for input_copy");
+  }
+
+  // Second pass: parse and store tokens
+  tok = strtok_r(input_copy, " \t\n\r,", &saveptr);
+  while (tok != NULL && idx < *token_count) {
+    char* endptr;
+    long token_id = strtol(tok, &endptr, 10);
+    if (*endptr != '\0') {
+      free(input_copy);
+      free(*tokens);
+      fprintf(stderr, "[StrasGPT] Error: invalid token ID: %s\n", tok);
+      exit(EXIT_FAILURE);
+    }
+    (*tokens)[idx++] = (int)token_id;
+    tok = strtok_r(NULL, " \t\n\r,", &saveptr);
+  }
+
+  free(input_copy);
+}

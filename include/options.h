@@ -19,6 +19,7 @@ typedef struct options {
   bool use_prompt_file;
   char* prompt_file;
   char* prompt_string;
+  bool pre_tokenized;
   char* model_dir;
   size_t step_count;
   size_t thread_count;

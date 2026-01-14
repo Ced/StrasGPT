@@ -162,7 +162,13 @@ int main(int argc, char* argv[]) {
   // Tokenize the prompt into token sequence
   size_t token_count = 0;
   int* token = NULL;
-  tokenizer_tokenize(tokenizer, prompt, true, false, &token_count, &token);
+  if (options->pre_tokenized) {
+    util_parse_tokens(
+        prompt, &token_count, &token, true, tokenizer->bos_token_id
+    );
+  } else {
+    tokenizer_tokenize(tokenizer, prompt, true, false, &token_count, &token);
+  }
   if (token_count < 1) {
     UTIL_ERROR("expected at least 1 prompt token");
   }
@@ -171,9 +177,20 @@ int main(int argc, char* argv[]) {
 
   // Print the prompt string (in blue)
   fprintf(stderr, "\033[1;34m");
-  while (*prompt) {
-    fprintf(stderr, "%c", *prompt);
-    prompt++;
+  if (options->pre_tokenized) {
+    // For pre-tokenized input, decode and print the tokens (except BOS)
+    for (size_t i = 1; i < token_count; i++) {
+      char* decoded = tokenizer_decode(tokenizer, token[i]);
+      if (decoded) {
+        tokenizer_print_token_string(stderr, decoded);
+      }
+    }
+  } else {
+    // For text input, print as-is
+    while (*prompt) {
+      fprintf(stderr, "%c", *prompt);
+      prompt++;
+    }
   }
   fprintf(stderr, "\033[0m");
 
@@ -190,8 +207,9 @@ int main(int argc, char* argv[]) {
   int predicted_token = 0;
   char* predicted_string = NULL;
   start = time_in_ms();
+  bool continue_generation = true;
 
-  #pragma omp parallel
+  #pragma omp parallel shared(continue_generation)
   {
     // First achieve prompt processing (prefill):
     // - Get the logits (probability distribution) for the next token
@@ -213,7 +231,6 @@ int main(int argc, char* argv[]) {
     }
 
     // Then achieve token generation (decode), one by one
-    bool continue_generation = true;
     while (generated_count < options->step_count && continue_generation) {
       transformer_predict(transformer, 1, &predicted_token, 1, logits);
 

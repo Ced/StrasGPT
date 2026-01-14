@@ -1,6 +1,7 @@
 #ifndef UTIL_H
 # define UTIL_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -108,5 +109,13 @@ void util_matrix_summary_int8(
         uint16_t*: util_matrix_summary_bf16, \
         int8_t*: util_matrix_summary_int8 \
     )(name, row_count, col_count, sample_count, m)
+
+void util_parse_tokens(
+    char* input,
+    size_t* token_count,
+    int** tokens,
+    bool add_bos,
+    int bos_token_id
+);
 
 #endif // UTIL_H

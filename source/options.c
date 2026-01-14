@@ -15,6 +15,7 @@ options_t* options_malloc(void) {
   options->use_prompt_file = false;
   options->prompt_file = OPTIONS_DEFAULT_PROMPT_FILE;
   options->prompt_string = OPTIONS_DEFAULT_PROMPT_STRING;
+  options->pre_tokenized = false;
   options->model_dir = OPTIONS_DEFAULT_MODEL_DIR;
   options->step_count = OPTIONS_DEFAULT_STEP_COUNT;
   options->thread_count = OPTIONS_DEFAULT_THREAD;
@@ -47,6 +48,9 @@ void options_print(FILE* f, const options_t* options) {
   } else {
     fprintf(f, "- prompt (string):  %s\n", options->prompt_string);
   }
+  fprintf(
+      f, "- pre_tokenized:    %s\n", options->pre_tokenized ? "true" : "false"
+  );
   fprintf(f, "- model_dir:        %s\n", options->model_dir);
   fprintf(f, "- step_count:       %zu\n", options->step_count);
   fprintf(f, "- thread_count:     %zu\n", options->thread_count);
@@ -80,6 +84,7 @@ void option_usage(char* argv[], int status) {
   fprintf(stderr, "  -p <string>     input prompt\n");
   fprintf(stderr, "  --presence-penalty <float> presence penalty in [0, 2]\n");
   fprintf(stderr, "                  (default 0.0)\n");
+  fprintf(stderr, "  --pre-tokenized input pre-tokenized (space separated)\n");
   fprintf(stderr, "  -s <int>        random seed (default time(NULL))\n");
   fprintf(stderr, "  --show-model    show model infos and exit\n");
   fprintf(stderr, "  --show-safetensors show safetensors infos and exit\n");
@@ -145,6 +150,9 @@ options_t* options_read(int argc, char* argv[]) {
         options_free(options);
         option_usage(argv, EXIT_FAILURE);
       }
+    } else if (strcmp(argv[i], "--pre-tokenized") == 0) {
+      options->pre_tokenized = true;
+      i--;
     } else if (strcmp(argv[i], "-s") == 0) {
       if (i + 1 < arg_count) {
         options->seed = strtoull(argv[i + 1], NULL, 10);

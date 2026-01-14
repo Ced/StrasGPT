@@ -185,6 +185,11 @@ char* tokenizer_decode(tokenizer_t* t, int token) {
     return TOKENIZER_STRING_TOKEN_EOS;
   }
 
+  // If token is out of range, we assume special token
+  if (token < 0 || (size_t)token >= t->token_string_count) {
+    return "<|unknown_token|>";
+  }
+
   char* token_string = t->token_string[token];
 
   // Careful, some token designate raw bytes, and look like e.g. '<0x01>'
