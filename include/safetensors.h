@@ -61,7 +61,7 @@ typedef struct safetensors{
   size_t vocabulary_len; // Vocabulary size
   size_t context_len;    // Maximum sequence length
   float  rope_theta;     // RoPE base frequency
-  bool rope_grouped_layout; // true: pairs grouped (HF) false interleaved (Meta)
+  bool rope_interleaved; // true: pairs interleaved (Meta), false: grouped (HF)
   size_t mrope_section_count; // Sections for multi-scale RoPE (0 if none)
   size_t mrope_section[SAFETENSORS_MAX_MROPE_SECTION_COUNT];
 

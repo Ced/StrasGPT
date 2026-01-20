@@ -30,6 +30,15 @@ static transformer_configuration_t* configuration_from_safetensors(
   config->vocabulary_len = safetensors->vocabulary_len;
   config->context_len = safetensors->context_len;
   config->rope_theta = safetensors->rope_theta;
+  if (safetensors->rope_interleaved) {
+    config->rope_pair_bound = safetensors->head_dim;
+    config->rope_pair_offset = 1;
+    config->rope_pair_stride = 2;
+  } else {
+    config->rope_pair_bound = safetensors->head_dim / 2;
+    config->rope_pair_offset = safetensors->head_dim / 2;
+    config->rope_pair_stride = 1;
+  }
   config->mrope_section_count = safetensors->mrope_section_count;
   if (config->mrope_section_count > 0) {
     size_t size = config->mrope_section_count * sizeof(*config->mrope_section);
@@ -114,87 +123,28 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   }
 
   // Initialize RoPE cosine and sine values
-  if (t->mrope_section_count == 0) {
-    for (size_t i = 0; i < t->context_len; i++) {
-      for (size_t j = 0; j < t->head_dim; j += 2) {
-        float freq = 1.0f / powf(t->rope_theta, j / (float)t->head_dim);
-        float val = i * freq;
-        s->rope_cos_sin[i * t->head_dim + j] = cosf(val);
-        s->rope_cos_sin[i * t->head_dim + j + 1] = sinf(val);
-      }
-    }
-  } else {
-    // Calculate section offsets
-    size_t section_offsets[4];
-    section_offsets[0] = 0;
-    for (size_t sec = 0; sec < t->mrope_section_count; sec++) {
-      section_offsets[sec + 1] = section_offsets[sec] + t->mrope_section[sec];
-    }
-
-    // Precompute RoPE for each section
-    for (size_t i = 0; i < t->context_len; i++) {
-      for (size_t sec = 0; sec < t->mrope_section_count; sec++) {
-        size_t section_start = section_offsets[sec];
-        size_t section_size = t->mrope_section[sec];
-
-        for (size_t j = 0; j < section_size; j++) {
-          // Key: denominator is 2 * section_size, not head_dim
-          float freq =
-              1.0f / powf(t->rope_theta, (2.0f * j) / (2.0f * section_size));
-          float val = i * freq; // i is the token position
-
-          size_t dim_idx = section_start + j;
-          s->rope_cos_sin[i * t->head_dim + dim_idx * 2] = cosf(val);
-          s->rope_cos_sin[i * t->head_dim + dim_idx * 2 + 1] = sinf(val);
-        }
-      }
+  // Half-split RoPE layout configuration
+  size_t rope_pair_bound = t->head_dim / 2;
+  size_t rope_pair_offset = t->head_dim / 2;
+  size_t rope_pair_stride = 1;
+  float rope_coef = 2.0f;
+  // Interleaved RoPE layout configuration
+  if (t->rope_interleaved) {
+    rope_pair_bound = t->head_dim;
+    rope_pair_offset = 1;
+    rope_pair_stride = 2;
+    rope_coef = 1.0f;
+  }
+  for (size_t i = 0; i < t->context_len; i++) {
+    for (size_t j = 0; j < rope_pair_bound; j += rope_pair_stride) {
+      float freq = 1.0f / powf(t->rope_theta, (rope_coef * j) / t->head_dim);
+      float val = i * freq;
+      s->rope_cos_sin[i * t->head_dim + j] = cosf(val);
+      s->rope_cos_sin[i * t->head_dim + j + rope_pair_offset] = sinf(val);
     }
   }
 
   return s;
-}
-
-// Permute Hugging Face weights (grouped RoPE layout) to Meta layout
-// (interleaved). The permutation matches the Python reference:
-// def permute_original(w, n_heads, dim1=dim, dim2=dim):
-//   return (
-//     w.view(dim1, dim2)
-//     .reshape(n_heads, dim1 // n_heads // 2, 2, dim2)
-//     .transpose(1, 2)
-//     .reshape(dim1, dim2)
-//   )
-static void permute_hf_to_meta(
-    size_t row_count, size_t col_count, size_t head_count, uint16_t* w
-) {
-  size_t head_dim = row_count / head_count;
-  size_t half_head = head_dim / 2;
-
-  uint16_t* buf = malloc(row_count * col_count * sizeof(uint16_t));
-  if (!buf) {
-    UTIL_DIE("failed to malloc for buffer");
-  }
-
-  for (size_t h = 0; h < head_count; h++) {
-    // Pointers to start of this head in source and destination
-    const uint16_t* src_head = w + h * head_dim * col_count;
-    uint16_t* dst_head = buf + h * head_dim * col_count;
-
-    // Reshape: [half_head, 2, col_count] -> transpose(0,1)
-    for (size_t j = 0; j < half_head; j++) {
-      for (size_t k = 0; k < 2; k++) {
-        // In HF layout:
-        // - first half_head rows: "real" parts
-        // - second half_head rows: "imag" parts
-        // After transpose, we interleave them.
-        const uint16_t* src = src_head + (k * half_head + j) * col_count;
-        uint16_t* dst = dst_head + (2 * j + k) * col_count;
-        memcpy(dst, src, col_count * sizeof(uint16_t));
-      }
-    }
-  }
-
-  memcpy(w, buf, row_count * col_count * sizeof(uint16_t));
-  free(buf);
 }
 
 // Match an unsigned integer at the start of *string, update *string to point
@@ -337,17 +287,6 @@ static void load_mha_q_weight(
       tensor->size,
       &weights->mha_q_weight[index * len]
   );
-
-  // Permute the weight from grouped (Hugging Face) layout to
-  // interleaved layout (Meta layout) if necessary
-  if (safetensors->rope_grouped_layout) {
-    permute_hf_to_meta(
-        safetensors->q_head_count * safetensors->head_dim,
-        safetensors->embedding_dim,
-        safetensors->q_head_count,
-        &weights->mha_q_weight[index * len]
-    );
-  }
 }
 
 static void load_mha_q_norm_weight(
@@ -393,17 +332,6 @@ static void load_mha_k_weight(
       tensor->size,
       &weights->mha_k_weight[index * len]
   );
-
-  // Permute the weight from grouped (Hugging Face) layout to
-  // interleaved layout (Meta layout) if necessary
-  if (safetensors->rope_grouped_layout) {
-    permute_hf_to_meta(
-        safetensors->kv_head_count * safetensors->head_dim,
-        safetensors->embedding_dim,
-        safetensors->kv_head_count,
-        &weights->mha_k_weight[index * len]
-    );
-  }
 }
 
 static void load_mha_k_norm_weight(
@@ -691,6 +619,7 @@ static bool tensor_load(
       return true;
     }
   }
+
   return false;
 }
 
@@ -860,6 +789,88 @@ void transformer_free(transformer_t* transformer) {
   free(transformer);
 }
 
+// Print a summary of the nth first transformer layers and return
+// the total size in GB of their weights
+double transformer_layer_size_gb(
+    FILE* f, const transformer_t* transformer, size_t n
+) {
+  if (!transformer) {
+    fprintf(f, "transformer: NULL\n");
+    return 0;
+  }
+
+  transformer_configuration_t* c = transformer->config;
+
+  size_t mha_norm_len = n * c->embedding_dim;
+  size_t mha_q_len = n * c->q_head_count * c->head_dim * c->embedding_dim;
+  size_t mha_qk_norm_len = n * c->head_dim;
+  size_t mha_kv_len = n * c->kv_head_count * c->head_dim * c->embedding_dim;
+  size_t mha_out_len = n * c->q_head_count * c->head_dim * c->embedding_dim;
+  size_t ffn_norm_len = n * c->embedding_dim;
+  size_t ffn_fc_len = n * c->embedding_dim * c->hidden_dim;
+  size_t ffn_up_len = n * c->embedding_dim * c->hidden_dim;
+  size_t ffn_out_len = n * c->hidden_dim * c->embedding_dim;
+
+  transformer_weights_t* w = transformer->weights;
+  double gb = 1024 * 1024 * 1024;
+  double mha_norm_gb = (mha_norm_len * sizeof(*w->mha_norm_weight)) / gb;
+  double mha_q_gb = (mha_q_len * sizeof(*w->mha_q_weight)) / gb;
+  double mha_q_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_q_norm_weight)) / gb;
+  double mha_k_gb = (mha_kv_len * sizeof(*w->mha_k_weight)) / gb;
+  double mha_k_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_k_norm_weight)) / gb;
+  double mha_v_gb = (mha_kv_len * sizeof(*w->mha_v_weight)) / gb;
+  double mha_out_gb = (mha_out_len * sizeof(*w->mha_out_weight)) / gb;
+  double ffn_norm_gb = (ffn_norm_len * sizeof(*w->ffn_norm_weight)) / gb;
+  double ffn_fc_gb = (ffn_fc_len * sizeof(*w->ffn_fc_weight)) / gb;
+  double ffn_up_gb = (ffn_up_len * sizeof(*w->ffn_up_weight)) / gb;
+  double ffn_out_gb = (ffn_out_len * sizeof(*w->ffn_out_weight)) / gb;
+  double total_gb = mha_norm_gb + mha_q_gb + mha_k_gb + mha_v_gb +
+                    mha_out_gb + ffn_norm_gb + ffn_fc_gb + ffn_up_gb +
+                    ffn_out_gb;
+
+  char s[SAFETENSORS_MAX_STRING];
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_norm", mha_norm_gb);
+  util_matrix_summary(s, 1, mha_norm_len, 3, w->mha_norm_weight);
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q", mha_q_gb);
+  util_matrix_summary(s, 1, mha_q_len, 3, w->mha_q_weight);
+
+  if (w->mha_q_norm_weight) {
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q_norm", mha_q_norm_gb);
+    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_q_norm_weight);
+    total_gb += mha_q_norm_gb;
+  }
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k", mha_k_gb);
+  util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
+
+  if (w->mha_k_norm_weight) {
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k_norm", mha_k_norm_gb);
+    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_k_norm_weight);
+    total_gb += mha_k_norm_gb;
+  }
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_v", mha_v_gb);
+  util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_v_weight);
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_out", mha_out_gb);
+  util_matrix_summary(s, 1, mha_out_len, 3, w->mha_out_weight);
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_norm", ffn_norm_gb);
+  util_matrix_summary(s, 1, ffn_norm_len, 3, w->ffn_norm_weight);
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_fc", ffn_fc_gb);
+  util_matrix_summary(s, 1, ffn_fc_len, 3, w->ffn_fc_weight);
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_up", ffn_up_gb);
+  util_matrix_summary(s, 1, ffn_up_len, 3, w->ffn_up_weight);
+
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_out", ffn_out_gb);
+  util_matrix_summary(s, 1, ffn_out_len, 3, w->ffn_out_weight);
+
+  return total_gb;
+}
+
 // Print a summary of a transformer_t structure
 void transformer_print(FILE* f, const transformer_t* transformer) {
   if (!transformer) {
@@ -880,6 +891,9 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   fprintf(f, "--- vocabulary_len:     %zu\n", c->vocabulary_len);
   fprintf(f, "--- context_len:        %zu\n", c->context_len);
   fprintf(f, "--- rope_theta:         %.1f\n", c->rope_theta);
+  fprintf(f, "--- rope_pair_bound     %zu\n", c->rope_pair_bound);
+  fprintf(f, "--- rope_pair_offset    %zu\n", c->rope_pair_offset);
+  fprintf(f, "--- rope_pair_stride    %zu\n", c->rope_pair_stride);
   fprintf(f, "--- mrope_sections:     ");
   if (c->mrope_section_count == 0) {
     fprintf(f, "none\n");
@@ -897,85 +911,25 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   char* aliased_out = c->aliased_out_weight ? "true" : "false";
   fprintf(f, "--- aliased_out_weight: %s\n", aliased_out);
 
-  size_t qkv_weight_dim = c->head_dim * c->embedding_dim;
-
   size_t embedding_len = c->vocabulary_len * c->embedding_dim;
-  size_t mha_norm_len = c->layer_count * c->embedding_dim;
-  size_t mha_q_len = c->layer_count * c->q_head_count * qkv_weight_dim;
-  size_t mha_qk_norm_len = c->layer_count * c->head_dim;
-  size_t mha_kv_len = c->layer_count * c->kv_head_count * qkv_weight_dim;
-  size_t mha_out_dim = c->q_head_count * c->head_dim;
-  size_t mha_out_len = c->layer_count * c->embedding_dim * mha_out_dim;
-  size_t ffn_norm_len = c->layer_count * c->embedding_dim;
-  size_t ffn_fc_len = c->layer_count * c->embedding_dim * c->hidden_dim;
-  size_t ffn_up_len = c->layer_count * c->embedding_dim * c->hidden_dim;
-  size_t ffn_out_len = c->layer_count * c->hidden_dim * c->embedding_dim;
   size_t out_norm_len = c->embedding_dim;
   size_t out_len = c->vocabulary_len * c->embedding_dim;
 
   transformer_weights_t* w = transformer->weights;
   double gb = 1024 * 1024 * 1024;
   double embedding_gb = (embedding_len * sizeof(*w->embedding_weight)) / gb;
-  double mha_norm_gb = (mha_norm_len * sizeof(*w->mha_norm_weight)) / gb;
-  double mha_q_gb = (mha_q_len * sizeof(*w->mha_q_weight)) / gb;
-  double mha_q_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_q_norm_weight)) / gb;
-  double mha_k_gb = (mha_kv_len * sizeof(*w->mha_k_weight)) / gb;
-  double mha_k_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_k_norm_weight)) / gb;
-  double mha_v_gb = (mha_kv_len * sizeof(*w->mha_v_weight)) / gb;
-  double mha_out_gb = (mha_out_len * sizeof(*w->mha_out_weight)) / gb;
-  double ffn_norm_gb = (ffn_norm_len * sizeof(*w->ffn_norm_weight)) / gb;
-  double ffn_fc_gb = (ffn_fc_len * sizeof(*w->ffn_fc_weight)) / gb;
-  double ffn_up_gb = (ffn_up_len * sizeof(*w->ffn_up_weight)) / gb;
-  double ffn_out_gb = (ffn_out_len * sizeof(*w->ffn_out_weight)) / gb;
   double out_norm_gb = (out_norm_len * sizeof(*w->out_norm_weight)) / gb;
   double out_gb =
       c->aliased_out_weight ? 0 : (out_len * sizeof(*w->out_weight)) / gb;
 
-  double total_gb = embedding_gb + mha_norm_gb + mha_q_gb + mha_k_gb +
-                    mha_v_gb + mha_out_gb + ffn_norm_gb + ffn_fc_gb +
-                    ffn_up_gb + ffn_out_gb + out_norm_gb + out_gb;
+  double total_gb = embedding_gb + out_norm_gb + out_gb;
 
-  fprintf(f, "- Weights (%.2f GB):\n", total_gb);
+  fprintf(f, "- Weights:\n");
   char s[SAFETENSORS_MAX_STRING];
   snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "embedding", embedding_gb);
   util_matrix_summary(s, 1, embedding_len, 3, w->embedding_weight);
 
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_norm", mha_norm_gb);
-  util_matrix_summary(s, 1, mha_norm_len, 3, w->mha_norm_weight);
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q", mha_q_gb);
-  util_matrix_summary(s, 1, mha_q_len, 3, w->mha_q_weight);
-
-  if (w->mha_q_norm_weight) {
-    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q_norm", mha_q_norm_gb);
-    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_q_norm_weight);
-  }
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k", mha_k_gb);
-  util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
-
-  if (w->mha_k_norm_weight) {
-    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k_norm", mha_k_norm_gb);
-    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_k_norm_weight);
-  }
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_v", mha_v_gb);
-  util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_out", mha_out_gb);
-  util_matrix_summary(s, 1, mha_out_len, 3, w->mha_out_weight);
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_norm", ffn_norm_gb);
-  util_matrix_summary(s, 1, ffn_norm_len, 3, w->ffn_norm_weight);
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_fc", ffn_fc_gb);
-  util_matrix_summary(s, 1, ffn_fc_len, 3, w->ffn_fc_weight);
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_up", ffn_up_gb);
-  util_matrix_summary(s, 1, ffn_up_len, 3, w->ffn_up_weight);
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_out", ffn_out_gb);
-  util_matrix_summary(s, 1, ffn_out_len, 3, w->ffn_out_weight);
+  total_gb += transformer_layer_size_gb(f, transformer, c->layer_count);
 
   snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "out_norm", out_norm_gb);
   util_matrix_summary(s, 1, out_norm_len, 3, w->out_norm_weight);
@@ -986,6 +940,14 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
     snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "out", out_gb);
     util_matrix_summary(s, 1, out_len, 3, w->out_weight);
   }
+  fprintf(f, "---  total size:%7.4f GB\n", total_gb);
+
+  #ifdef DEBUG
+  fprintf(f, "- Layer 0 weights:\n");
+  double layer_0_size = 0;
+  layer_0_size += transformer_layer_size_gb(f, transformer, 1);
+  fprintf(f, "---  total size:%7.4f GB\n", layer_0_size);
+  #endif
 }
 
 // Allocate a logits buffer for a given number of tokens
@@ -1024,11 +986,13 @@ static void rmsnorm(
     ss += x[j] * x[j];
   }
   ss /= embedding_dim;
-  ss += epsilon;
-  ss = 1.0f / sqrtf(ss);
+  ss = (float)(1. / sqrtf(ss + epsilon));
   // Normalize and scale
   for (size_t j = 0; j < embedding_dim; j++) {
-    y[j] = util_bf16_to_f32(w[j]) * (ss * x[j]);
+    y[j] =  (x[j] * ss);
+  }
+    for (size_t j = 0; j < embedding_dim; j++) {
+    y[j] *= util_bf16_to_f32(w[j]);
   }
 }
 
@@ -1231,6 +1195,9 @@ static void transformer_predict_chunk(
     size_t embedding_dim,
     size_t head_dim,
     size_t hidden_dim,
+    size_t rope_pair_bound,
+    size_t rope_pair_offset,
+    size_t rope_pair_stride,
     float epsilon,
     // Weights
     uint16_t embedding_weight[restrict vocabulary_len][embedding_dim],
@@ -1341,13 +1308,14 @@ static void transformer_predict_chunk(
     #pragma omp for collapse(2) schedule(static) nowait
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h += 2) {
+        for (size_t h = 0; h < rope_pair_bound; h += rope_pair_stride) {
           float fr = rope_cos_sin[cached_count + t][h + 0];
-          float fi = rope_cos_sin[cached_count + t][h + 1];
+          float fi = rope_cos_sin[cached_count + t][h + rope_pair_offset];
           float v0 = k_cache[l][k][cached_count + t][h + 0];
-          float v1 = k_cache[l][k][cached_count + t][h + 1];
+          float v1 = k_cache[l][k][cached_count + t][h + rope_pair_offset];
           k_cache[l][k][cached_count + t][h + 0] = v0 * fr - v1 * fi;
-          k_cache[l][k][cached_count + t][h + 1] = v0 * fi + v1 * fr;
+          k_cache[l][k][cached_count + t][h + rope_pair_offset] =
+              v0 * fi + v1 * fr;
         }
       }
     }
@@ -1390,13 +1358,13 @@ static void transformer_predict_chunk(
     for (size_t k = 0; k < kv_head_count; k++) {
       for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
         for (size_t t = 0; t < token_count; t++) {
-          for (size_t h = 0; h < head_dim; h += 2) {
+          for (size_t h = 0; h < rope_pair_bound; h += rope_pair_stride) {
             float fr = rope_cos_sin[cached_count + t][h + 0];
-            float fi = rope_cos_sin[cached_count + t][h + 1];
+            float fi = rope_cos_sin[cached_count + t][h + rope_pair_offset];
             float v0 = mha_q[k][q][t][h + 0];
-            float v1 = mha_q[k][q][t][h + 1];
+            float v1 = mha_q[k][q][t][h + rope_pair_offset];
             mha_q[k][q][t][h + 0] = v0 * fr - v1 * fi;
-            mha_q[k][q][t][h + 1] = v0 * fi + v1 * fr;
+            mha_q[k][q][t][h + rope_pair_offset] = v0 * fi + v1 * fr;
           }
         }
       }
@@ -1525,30 +1493,6 @@ static void transformer_predict_chunk(
       }
     }
 
-    #ifdef DEBUG
-    #pragma omp single
-    if (l == 0 || l == layer_count - 1) {
-      size_t mha_len = token_count * embedding_dim;
-      size_t att_len = token_count * q_head_count * head_dim;
-      size_t hidden_len = token_count * hidden_dim;
-      size_t score_len = q_head_count * token_count * context_len;
-      if (l == 0) {
-        fprintf(stderr, "\n\n");
-      }
-      fprintf(stderr, "Transformer state at layer %zu:\n", l);
-      util_matrix_summary("- embedding", 1, mha_len, 3, (float*)embedding);
-      util_matrix_summary("-  mha_norm", 1, mha_len, 3, (float*)mha_norm);
-      util_matrix_summary("-     mha_q", 1, mha_len, 3, (float*)mha_q);
-      util_matrix_summary("- mha_score", 1, score_len, 3, (float*)mha_score);
-      util_matrix_summary("-   mha_att", 1, att_len, 3, (float*)mha_att);
-      util_matrix_summary("-   mha_out", 1, mha_len, 3, (float*)mha_out);
-      util_matrix_summary("-  ffn_norm", 1, mha_len, 3, (float*)ffn_norm);
-      util_matrix_summary("-    ffn_fc", 1, hidden_len, 3, (float*)ffn_fc);
-      util_matrix_summary("-    ffn_up", 1, hidden_len, 3, (float*)ffn_up);
-      util_matrix_summary("-   ffn_out", 1, mha_len, 3, (float*)ffn_out);
-    }
-    #endif
-
     // Residual connection
     #pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
@@ -1556,6 +1500,77 @@ static void transformer_predict_chunk(
         embedding[t][e] += ffn_out[t][e];
       }
     }
+
+    #ifdef DEBUG
+    #pragma omp single
+    if (l == 0 || l == layer_count - 1) {
+      size_t mha_len = token_count * embedding_dim;
+      size_t norm_len = embedding_dim;
+      size_t q_len = q_head_count * token_count * head_dim;
+      size_t kv_len = kv_head_count * token_count * head_dim;
+      size_t att_len = token_count * q_head_count * head_dim;
+      size_t hidden_len = token_count * hidden_dim;
+
+      // Re-materialize input embedding for debug output
+      float* input = malloc(mha_len * sizeof(*input));
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t e = 0; e < embedding_dim; e++) {
+          input[t * embedding_dim + e] =
+              util_bf16_to_f32(embedding_weight[token[t]][e]);
+        }
+      }
+
+      // Flatten Q, K, V caches for debug output
+      float* q_flat = malloc(q_len * sizeof(*q_flat));
+      float* k_flat = malloc(kv_len * sizeof(*k_flat));
+      float* v_flat = malloc(kv_len * sizeof(*v_flat));
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
+            for (size_t h = 0; h < head_dim; h++) {
+              q_flat[k * (q_head_per_kv_head_count * token_count * head_dim) +
+                     q * (token_count * head_dim) +
+                     t * (head_dim) +
+                     h] =
+                  mha_q[k][q][t][h];
+            }
+          }
+        }
+      }
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t t = 0; t < token_count; t++) {
+          for (size_t h = 0; h < head_dim; h++) {
+            k_flat[k * (token_count * head_dim) + t * (head_dim) + h] =
+                k_cache[l][k][cached_count + t][h];
+            v_flat[k * (token_count * head_dim) + t * (head_dim) + h] =
+                v_cache[l][k][cached_count + t][h];
+          }
+        }
+      }
+
+      if (l == 0) {
+        fprintf(stderr, "\n\n");
+      }
+      fprintf(stderr, "Transformer state (activations) at layer %zu:\n", l);
+      util_matrix_summary("- input emb", 1, mha_len, 3, (float*)input);
+      util_matrix_summary("-  mha_norm", 1, mha_len, 3, (float*)mha_norm);
+      util_matrix_summary("-    q_flat", 1, q_len, 3, (float*)q_flat);
+      util_matrix_summary("-    k_flat", 1, kv_len, 3, (float*)k_flat);
+      util_matrix_summary("-    v_flat", 1, kv_len, 3, (float*)v_flat);
+      util_matrix_summary("-   mha_att", 1, att_len, 3, (float*)mha_att);
+      util_matrix_summary("-   mha_out", 1, mha_len, 3, (float*)mha_out);
+      util_matrix_summary("-  ffn_norm", 1, mha_len, 3, (float*)ffn_norm);
+      util_matrix_summary("-    ffn_fc", 1, hidden_len, 3, (float*)ffn_fc);
+      util_matrix_summary("-    ffn_up", 1, hidden_len, 3, (float*)ffn_up);
+      util_matrix_summary("-   ffn_out", 1, mha_len, 3, (float*)ffn_out);
+      util_matrix_summary("- final emb", 1, mha_len, 3, (float*)embedding);
+
+      free(input);
+      free(q_flat);
+      free(k_flat);
+      free(v_flat);
+    }
+    #endif
 
     #pragma omp barrier
   }
@@ -1615,6 +1630,9 @@ void transformer_predict(
   size_t embedding_dim = c->embedding_dim;
   size_t head_dim = c->head_dim;
   size_t hidden_dim = c->hidden_dim;
+  size_t rope_pair_bound = c->rope_pair_bound;
+  size_t rope_pair_offset = c->rope_pair_offset;
+  size_t rope_pair_stride = c->rope_pair_stride;
 
   // Clamp logits_count to available positions
   if (logits_count > token_count) {
@@ -1661,7 +1679,10 @@ void transformer_predict(
         embedding_dim,
         head_dim,
         hidden_dim,
-        1e-5f,
+        rope_pair_bound,
+        rope_pair_offset,
+        rope_pair_stride,
+        1e-6f,
 
         (uint16_t (*)[embedding_dim])w->embedding_weight,
         (uint16_t (*)[embedding_dim])w->mha_norm_weight,

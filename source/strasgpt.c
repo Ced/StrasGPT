@@ -164,7 +164,7 @@ int main(int argc, char* argv[]) {
   int* token = NULL;
   if (options->pre_tokenized) {
     util_parse_tokens(
-        prompt, &token_count, &token, true, tokenizer->bos_token_id
+        prompt, &token_count, &token, false, tokenizer->bos_token_id
     );
   } else {
     tokenizer_tokenize(tokenizer, prompt, true, false, &token_count, &token);

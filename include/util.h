@@ -118,4 +118,12 @@ void util_parse_tokens(
     int bos_token_id
 );
 
+void util_meta_to_hf(
+    size_t row_count, size_t col_count, size_t head_count, uint16_t* w
+);
+
+void util_hf_to_meta(
+    size_t row_count, size_t col_count, size_t head_count, uint16_t* w
+);
+
 #endif // UTIL_H

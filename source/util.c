@@ -295,3 +295,111 @@ void util_parse_tokens(
 
   free(input_copy);
 }
+
+// ----------------------------------------------------------------------------
+
+// util_hf_to_meta:
+// ----------------
+// Permute Hugging Face weights (half-split RoPE layout) to Meta layout
+// (interleaved). Within each attention head, the weight matrix is reshaped
+// from [half_head, 2, col_count] and transposed to [2, half_head, col_count],
+// effectively interleaving the real and imaginary parts.
+//
+// HF layout (half-split/SoA):
+//     [real_0, real_1, ..., real_n, imag_0, imag_1, ..., imag_n]
+// Meta layout (interleaved/AoS):
+//     [real_0, imag_0, real_1, imag_1, ..., real_n, imag_n]
+//
+// Parameters:
+// - row_count:  Total number of rows (head_count * head_dim)
+// - col_count:  Number of columns (embedding_dim)
+// - head_count: Number of attention heads
+// - w:          Pointer to the weight matrix to permute in-place
+
+void util_hf_to_meta(
+    size_t row_count, size_t col_count, size_t head_count, uint16_t* w
+) {
+  size_t head_dim = row_count / head_count;
+  size_t half_head = head_dim / 2;
+
+  uint16_t* buf = malloc(row_count * col_count * sizeof(uint16_t));
+  if (!buf) {
+    UTIL_DIE("failed to malloc for buffer");
+  }
+
+  for (size_t h = 0; h < head_count; h++) {
+    // Pointers to start of this head in source and destination
+    const uint16_t* src_head = w + h * head_dim * col_count;
+    uint16_t* dst_head = buf + h * head_dim * col_count;
+
+    // Reshape: [half_head, 2, col_count] -> transpose(0,1)
+    for (size_t j = 0; j < half_head; j++) {
+      for (size_t k = 0; k < 2; k++) {
+        // In HF layout:
+        // - first half_head rows: "real" parts
+        // - second half_head rows: "imag" parts
+        // After transpose, we interleave them.
+        const uint16_t* src = src_head + (k * half_head + j) * col_count;
+        uint16_t* dst = dst_head + (2 * j + k) * col_count;
+        memcpy(dst, src, col_count * sizeof(uint16_t));
+      }
+    }
+  }
+
+  memcpy(w, buf, row_count * col_count * sizeof(uint16_t));
+  free(buf);
+}
+
+// util_meta_to_hf:
+// ----------------
+// Permute Meta weights (interleaved RoPE layout) to Hugging Face layout
+// (half-split). Within each attention head, the weight matrix is reshaped
+// from [2, half_head, col_count] and transposed to [half_head, 2, col_count],
+// effectively grouping the real and imaginary parts into separate halves.
+//
+// Meta layout (interleaved/AoS):
+//     [real_0, imag_0, real_1, imag_1, ..., real_n, imag_n]
+// HF layout (half-split/SoA):
+//     [real_0, real_1, ..., real_n, imag_0, imag_1, ..., imag_n]
+//
+// Parameters:
+// - row_count:  Total number of rows (head_count * head_dim)
+// - col_count:  Number of columns (embedding_dim)
+// - head_count: Number of attention heads
+// - w:          Pointer to the weight matrix to permute in-place
+
+void util_meta_to_hf(
+    size_t row_count, size_t col_count, size_t head_count, uint16_t* w
+) {
+  size_t head_dim = row_count / head_count;
+  size_t half_head = head_dim / 2;
+
+  uint16_t* buf = malloc(row_count * col_count * sizeof(uint16_t));
+  if (!buf) {
+    UTIL_DIE("failed to malloc for buffer");
+  }
+
+  for (size_t h = 0; h < head_count; h++) {
+    // Pointers to start of this head in source and destination
+    const uint16_t* src_head = w + h * head_dim * col_count;
+    uint16_t* dst_head = buf + h * head_dim * col_count;
+
+    // Reshape: [half_head, 2, col_count] -> transpose(0,1)
+    // In Meta (interleaved) layout, rows are [real0, imag0, real1, imag1, ...]
+    // We want HF layout: first all reals, then all imags.
+    for (size_t j = 0; j < half_head; j++) {
+      for (size_t k = 0; k < 2; k++) {
+        // In Meta layout (interleaved):
+        // - row (2*j + 0) is "real" for position j
+        // - row (2*j + 1) is "imag" for position j
+        // After transpose, we split them into two contiguous halves.
+        const uint16_t* src = src_head + (2 * j + k) * col_count;
+        uint16_t* dst = dst_head + (k * half_head + j) * col_count;
+        memcpy(dst, src, col_count * sizeof(uint16_t));
+      }
+    }
+  }
+
+  memcpy(w, buf, row_count * col_count * sizeof(uint16_t));
+  free(buf);
+}

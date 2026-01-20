@@ -21,35 +21,36 @@
  */
 %x KW_AS_STRING
 
-integer        [+-]?[0-9]+
-float          [+-]?(([0-9]*\.[0-9]+)|([0-9]+\.)|[0-9]+)([eE][+-]?[0-9]+)?
+integer           [+-]?[0-9]+
+float             [+-]?(([0-9]*\.[0-9]+)|([0-9]+\.)|[0-9]+)([eE][+-]?[0-9]+)?
 
-metadata       \"__metadata__\"|\"metadata\"
-text_config    \"text_config\"
-type           \"dtype\"
-shape          \"shape\"
-offset         \"data_offsets\"
-weight_map     \"weight_map\"
-bos_token_id   \"bos_token_id\"
-eos_token_id   \"eos_token_id\"
-embedding_dim  \"hidden_size\"
-head_dim       \"head_dim\"
-hidden_dim     \"intermediate_size\"
-layer_count    \"num_hidden_layers\"
-model_type     \"model_type\"
-q_head_count   \"num_attention_heads\"
-kv_head_count  \"num_key_value_heads\"
-vocabulary_len \"vocab_size\"
-context_len    \"max_position_embeddings\"
-rope_theta     \"rope_theta\"
-rope_scaling   \"rope_scaling\"
-mrope_section  \"mrope_section\"
-model          \"model\"
-vocab          \"vocab\"
+metadata          \"__metadata__\"|\"metadata\"
+text_config       \"text_config\"
+type              \"dtype\"
+shape             \"shape\"
+offset            \"data_offsets\"
+weight_map        \"weight_map\"
+bos_token_id      \"bos_token_id\"
+eos_token_id      \"eos_token_id\"
+embedding_dim     \"hidden_size\"
+head_dim          \"head_dim\"
+hidden_dim        \"intermediate_size\"
+layer_count       \"num_hidden_layers\"
+model_type        \"model_type\"
+q_head_count      \"num_attention_heads\"
+kv_head_count     \"num_key_value_heads\"
+vocabulary_len    \"vocab_size\"
+context_len       \"max_position_embeddings\"
+rope_theta        \"rope_theta\"
+rope_scaling      \"rope_scaling\"
+mrope_interleaved \"mrope_interleaved\"
+mrope_section     \"mrope_section\"
+model             \"model\"
+vocab             \"vocab\"
 
-string         \"(\\.|[^\"\\])*\"
-boolean        true|false
-null           null
+string            \"(\\.|[^\"\\])*\"
+boolean           true|false
+null              null
 
 %%
 
@@ -170,6 +171,11 @@ null           null
 <INITIAL>{rope_scaling} {
   dump("rope_scaling", yytext);
   return ROPE_SCALING;
+}
+
+<INITIAL>{mrope_interleaved} {
+  dump("mrope_interleaved", yytext);
+  return MROPE_INTERLEAVED;
 }
 
 <INITIAL>{mrope_section} {

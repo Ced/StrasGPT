@@ -18,9 +18,12 @@ typedef struct transformer_configuration {
   size_t vocabulary_len;   // Vocabulary size
   size_t context_len;      // Maximum sequence length
   float  rope_theta;       // RoPE base frequency
-  bool aliased_out_weight; // True if out_weight is aliased to embedding_weight
+  size_t rope_pair_bound;  // Interleaved: head_dim, half-split: head_dim / 2
+  size_t rope_pair_offset; // Interleaved: 1, half-split: head_dim / 2
+  size_t rope_pair_stride; // Interleaved: 2, half-split: 1
   size_t mrope_section_count; // Number of multi-scale RoPE section (0 if none)
   size_t* mrope_section;   // Sections for multi-scale RoPE (NULL if none)
+  bool aliased_out_weight; // True if out_weight is aliased to embedding_weight
 } transformer_configuration_t;
 
 typedef struct transformer_weights {

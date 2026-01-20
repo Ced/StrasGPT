@@ -44,19 +44,19 @@ void safetensors_print(FILE* f, const safetensors_t* safetensors) {
   // Print files
   fprintf(f, "Safetensors:\n");
   fprintf(f, "- Configuration:\n");
-  fprintf(f, "--- embedding_dim:  %zu\n", safetensors->embedding_dim);
-  fprintf(f, "--- head_dim:       %zu\n", safetensors->head_dim);
-  fprintf(f, "--- hidden_dim:     %zu\n", safetensors->hidden_dim);
-  fprintf(f, "--- layer_count:    %zu\n", safetensors->layer_count);
-  fprintf(f, "--- q_head_count:   %zu\n", safetensors->q_head_count);
-  fprintf(f, "--- kv_head_count:  %zu\n", safetensors->kv_head_count);
-  fprintf(f, "--- vocabulary_len: %zu\n", safetensors->vocabulary_len);
-  fprintf(f, "--- context_len:    %zu\n", safetensors->context_len);
-  fprintf(f, "--- rope_theta:     %.1f\n", safetensors->rope_theta);
+  fprintf(f, "--- embedding_dim:    %zu\n", safetensors->embedding_dim);
+  fprintf(f, "--- head_dim:         %zu\n", safetensors->head_dim);
+  fprintf(f, "--- hidden_dim:       %zu\n", safetensors->hidden_dim);
+  fprintf(f, "--- layer_count:      %zu\n", safetensors->layer_count);
+  fprintf(f, "--- q_head_count:     %zu\n", safetensors->q_head_count);
+  fprintf(f, "--- kv_head_count:    %zu\n", safetensors->kv_head_count);
+  fprintf(f, "--- vocabulary_len:   %zu\n", safetensors->vocabulary_len);
+  fprintf(f, "--- context_len:      %zu\n", safetensors->context_len);
+  fprintf(f, "--- rope_theta:       %.1f\n", safetensors->rope_theta);
   fprintf(
       f,
-      "--- rope_layout:    %s\n",
-      safetensors->rope_grouped_layout ? "grouped" : "interleaved"
+      "--- rope_interleaved: %s\n",
+      safetensors->rope_interleaved ? "true" : "false"
   );
   fprintf(f, "--- mrope_sections: ");
   if (safetensors->mrope_section_count == 0) {
