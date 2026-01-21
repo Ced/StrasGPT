@@ -29,6 +29,7 @@ static transformer_configuration_t* configuration_from_safetensors(
   config->kv_head_count = safetensors->kv_head_count;
   config->vocabulary_len = safetensors->vocabulary_len;
   config->context_len = safetensors->context_len;
+  config->epsilon = safetensors->epsilon;
   config->rope_theta = safetensors->rope_theta;
   if (safetensors->rope_interleaved) {
     config->rope_pair_bound = safetensors->head_dim;
@@ -890,6 +891,7 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   fprintf(f, "--- kv_head_count:      %zu\n", c->kv_head_count);
   fprintf(f, "--- vocabulary_len:     %zu\n", c->vocabulary_len);
   fprintf(f, "--- context_len:        %zu\n", c->context_len);
+  fprintf(f, "--- epsilon:            %g\n", c->epsilon);
   fprintf(f, "--- rope_theta:         %.1f\n", c->rope_theta);
   fprintf(f, "--- rope_pair_bound     %zu\n", c->rope_pair_bound);
   fprintf(f, "--- rope_pair_offset    %zu\n", c->rope_pair_offset);
@@ -1630,9 +1632,6 @@ void transformer_predict(
   size_t embedding_dim = c->embedding_dim;
   size_t head_dim = c->head_dim;
   size_t hidden_dim = c->hidden_dim;
-  size_t rope_pair_bound = c->rope_pair_bound;
-  size_t rope_pair_offset = c->rope_pair_offset;
-  size_t rope_pair_stride = c->rope_pair_stride;
 
   // Clamp logits_count to available positions
   if (logits_count > token_count) {
@@ -1679,10 +1678,10 @@ void transformer_predict(
         embedding_dim,
         head_dim,
         hidden_dim,
-        rope_pair_bound,
-        rope_pair_offset,
-        rope_pair_stride,
-        1e-6f,
+        c->rope_pair_bound,
+        c->rope_pair_offset,
+        c->rope_pair_stride,
+        c->epsilon,
 
         (uint16_t (*)[embedding_dim])w->embedding_weight,
         (uint16_t (*)[embedding_dim])w->mha_norm_weight,

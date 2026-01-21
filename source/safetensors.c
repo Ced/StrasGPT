@@ -184,6 +184,7 @@ void safetensors_print_model_infos(FILE* f, const safetensors_t* s) {
   fprintf(f, "--- q_head_per_kv_head_count: %zu\n", q_head_per_kv_head_count);
   fprintf(f, "--- vocabulary_len:           %zu\n", s->vocabulary_len);
   fprintf(f, "--- context_len:              %zu\n", s->context_len);
+  fprintf(f, "--- epsilon:                  %.g\n", s->epsilon);
   fprintf(f, "--- rope_theta:               %.1f\n", s->rope_theta);
   fprintf(f, "--- mrope_sections:           ");
   if (s->mrope_section_count == 0) {

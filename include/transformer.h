@@ -17,7 +17,8 @@ typedef struct transformer_configuration {
   size_t kv_head_count;    // Number of key/value heads
   size_t vocabulary_len;   // Vocabulary size
   size_t context_len;      // Maximum sequence length
-  float  rope_theta;       // RoPE base frequency
+  float epsilon;           // RMSNorm epsilon value
+  float rope_theta;        // RoPE base frequency
   size_t rope_pair_bound;  // Interleaved: head_dim, half-split: head_dim / 2
   size_t rope_pair_offset; // Interleaved: 1, half-split: head_dim / 2
   size_t rope_pair_stride; // Interleaved: 2, half-split: 1

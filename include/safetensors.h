@@ -60,7 +60,8 @@ typedef struct safetensors{
   size_t kv_head_count;  // Number of key/value heads
   size_t vocabulary_len; // Vocabulary size
   size_t context_len;    // Maximum sequence length
-  float  rope_theta;     // RoPE base frequency
+  float epsilon;         // RMSNorm epsilon value
+  float rope_theta;      // RoPE base frequency
   bool rope_interleaved; // true: pairs interleaved (Meta), false: grouped (HF)
   size_t mrope_section_count; // Sections for multi-scale RoPE (0 if none)
   size_t mrope_section[SAFETENSORS_MAX_MROPE_SECTION_COUNT];

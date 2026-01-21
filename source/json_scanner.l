@@ -41,6 +41,7 @@ q_head_count      \"num_attention_heads\"
 kv_head_count     \"num_key_value_heads\"
 vocabulary_len    \"vocab_size\"
 context_len       \"max_position_embeddings\"
+epsilon           \"rms_norm_eps\"
 rope_theta        \"rope_theta\"
 rope_scaling      \"rope_scaling\"
 mrope_interleaved \"mrope_interleaved\"
@@ -161,6 +162,11 @@ null              null
 <INITIAL>{context_len} {
   dump("context_len", yytext);
   return CONTEXT_LEN;
+}
+
+<INITIAL>{epsilon} {
+  dump("epsilon", yytext);
+  return EPSILON;
 }
 
 <INITIAL>{rope_theta} {
