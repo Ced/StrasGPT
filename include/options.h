@@ -31,6 +31,7 @@ typedef struct options {
   unsigned long long seed;
   bool show_model;
   bool show_safetensors;
+  bool instruct;
 } options_t;
 
 options_t* options_malloc(void);

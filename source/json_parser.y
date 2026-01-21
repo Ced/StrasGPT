@@ -129,6 +129,7 @@ config_member
     }
   | MODEL_TYPE ':' STRING
     {
+      parser_safetensors->model_type = strdup($3);
       free($3);
     }
   | Q_HEAD_COUNT ':' NUMBER

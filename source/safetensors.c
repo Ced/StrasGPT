@@ -24,6 +24,7 @@ safetensors_t* safetensors_malloc(void) {
 // Free a safetensors_t structure
 void safetensors_free(safetensors_t* safetensors) {
   if (safetensors) {
+    free(safetensors->model_type);
     for (size_t i = 0; i < safetensors->file_count; i++) {
       free(safetensors->file[i]);
     }
@@ -44,6 +45,11 @@ void safetensors_print(FILE* f, const safetensors_t* safetensors) {
   // Print files
   fprintf(f, "Safetensors:\n");
   fprintf(f, "- Configuration:\n");
+  if (safetensors->model_type) {
+    fprintf(f, "--- model_type:       %s\n", safetensors->model_type);
+  } else {
+    fprintf(f, "--- model_type:       (null)\n");
+  }
   fprintf(f, "--- embedding_dim:    %zu\n", safetensors->embedding_dim);
   fprintf(f, "--- head_dim:         %zu\n", safetensors->head_dim);
   fprintf(f, "--- hidden_dim:       %zu\n", safetensors->hidden_dim);

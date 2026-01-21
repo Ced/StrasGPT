@@ -403,3 +403,172 @@ void util_meta_to_hf(
   memcpy(w, buf, row_count * col_count * sizeof(uint16_t));
   free(buf);
 }
+
+// ----------------------------------------------------------------------------
+
+// Wrap prompt with instruction tokens based on model type
+char* format_instruction_prompt(
+    char* prompt, char* model_type
+) {
+  if (!model_type) {
+    return strdup(prompt);
+  }
+
+  char* formatted = NULL;
+  size_t len = strlen(prompt);
+
+  // Detect model type and apply appropriate template
+  if (strstr(model_type, "Qwen") || strstr(model_type, "qwen")) {
+    // Qwen
+    const char* template =
+        "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n"
+        "<|im_start|>user\n%s<|im_end|>\n"
+        "<|im_start|>assistant";
+    formatted = malloc(strlen(template) + len + 1);
+    if (formatted) {
+      sprintf(formatted, template, prompt);
+    }
+  } else if (strstr(model_type, "Mistral") || strstr(model_type, "mistral")) {
+    // Mistral
+    const char* template = "<s>[INST] %s [/INST]";
+    formatted = malloc(strlen(template) + len + 1);
+    if (formatted) {
+      sprintf(formatted, template, prompt);
+    }
+  } else if (strstr(model_type, "Llama") || strstr(model_type, "llama")) {
+    // Llama 3
+    const char* template =
+        "<|begin_of_text|>\n<|start_header_id|>system<|end_header_id|>\n"
+        "You are a helpful assistant.\n<|eot_id|>\n"
+        "<|start_header_id|>user<|end_header_id|>\n%s<|eot_id|>\n"
+        "<|start_header_id|>assistant<|end_header_id|>";
+    formatted = malloc(strlen(template) + len + 1);
+    if (formatted) {
+      sprintf(formatted, template, prompt);
+    }
+  } else {
+    // Unknown model type, return prompt as-is
+    formatted = strdup(prompt);
+  }
+
+  if (!formatted) {
+    UTIL_DIE("malloc failed for formatted instruction prompt");
+  }
+  return formatted;
+}
+
+static void prepend_append_tokens(
+    size_t* token_count,
+    int** token,
+    size_t prefix_len,
+    int* prefix,
+    size_t suffix_len,
+    int* suffix
+) {
+  size_t old_len = *token_count;
+  size_t new_len = prefix_len + old_len + suffix_len;
+
+  int* new_token = (int*)realloc(*token, new_len * sizeof(*new_token));
+  if (!new_token) {
+    UTIL_DIE("realloc failed for token array");
+  }
+
+  // Move original tokens forward to make room for prefix
+  if (prefix_len && old_len) {
+    memmove(new_token + prefix_len, new_token, old_len * sizeof(*new_token));
+  }
+
+  // Copy prefix
+  if (prefix_len) {
+    memcpy(new_token, prefix, prefix_len * sizeof(*new_token));
+  }
+
+  // Copy suffix
+  if (suffix_len) {
+    size_t suffix_size = suffix_len * sizeof(*new_token);
+    memcpy(new_token + prefix_len + old_len, suffix, suffix_size);
+  }
+
+  *token_count = new_len;
+  *token = new_token;
+}
+
+// format_instruction_tokens_pre_tokenized:
+// ----------------------------------------
+// Wrap pre-tokenized input with instruction template based on model type.
+// This function modifies the token array in-place by prepending and appending
+// model-specific instruction tokens (system prompt, user/assistant delimiters).
+// See format_instruction_prompt function for model-specific textual sequences
+// Note: we use this function instead until we have a stronger tokenizer
+//
+// Parameters:
+// - token_count:  Pointer to the number of tokens (updated with new count)
+// - token:        Pointer to the token array (reallocated to fit new tokens)
+// - model_type:   Model identifier string (e.g., "qwen3", "mistral", "llama")
+//
+// Notes:
+// - Supports Qwen, Mistral, and Llama instruction templates
+// - If model_type is NULL or unrecognized, no modification is performed
+// - The token array is reallocated; caller maintains ownership
+
+void format_instruction_tokens_pre_tokenized(
+    size_t* token_count,
+    int** token,
+    char* model_type
+) {
+  if (!model_type) {
+    return;
+  }
+
+  // Qwen
+  if (strstr(model_type, "qwen3") || strstr(model_type, "qwen3_vl")) {
+    int prefix[] = {
+      151644, 8948, 198, 2610, 525, 264, 10950, 17847,
+      624, 151645, 198, 151644, 872, 198
+    };
+    int suffix[] = {
+      198, 151645, 198, 151644, 77091
+    };
+
+    size_t prefix_len = sizeof(prefix) / sizeof(prefix[0]);
+    size_t suffix_len = sizeof(suffix) / sizeof(suffix[0]);
+    prepend_append_tokens(
+        token_count, token, prefix_len, prefix, suffix_len, suffix
+    );
+    return;
+  }
+
+  // Mistral
+  if (strstr(model_type, "Mistral") || strstr(model_type, "mistral")) {
+    int prefix[] = { 1, 1, 3 };
+    int suffix[] = { 4 };
+
+    size_t prefix_len = sizeof(prefix) / sizeof(prefix[0]);
+    size_t suffix_len = sizeof(suffix) / sizeof(suffix[0]);
+    prepend_append_tokens(
+        token_count, token, prefix_len, prefix, suffix_len, suffix
+    );
+    return;
+  }
+
+  // Llama
+  if (strstr(model_type, "Llama") || strstr(model_type, "llama")) {
+    int prefix[] = {
+      128000, 128000, 198, 128006, 9125, 128007, 198,
+      2675, 527, 264, 11190, 18328, 627, 128009, 198,
+      128006, 882, 128007, 198
+    };
+    int suffix[] = {
+      198, 128009, 198, 128006, 78191, 128007
+    };
+
+    size_t prefix_len = sizeof(prefix) / sizeof(prefix[0]);
+    size_t suffix_len = sizeof(suffix) / sizeof(suffix[0]);
+    prepend_append_tokens(
+        token_count, token, prefix_len, prefix, suffix_len, suffix
+    );
+    return;
+  }
+
+  // Unknown model type, do nothing
+}

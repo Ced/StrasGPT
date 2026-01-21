@@ -126,4 +126,14 @@ void util_hf_to_meta(
     size_t row_count, size_t col_count, size_t head_count, uint16_t* w
 );
 
+char* format_instruction_prompt(
+    char* prompt, char* model_type
+);
+
+void format_instruction_tokens_pre_tokenized(
+    size_t* token_count,
+    int** token,
+    char* model_type
+);
+
 #endif // UTIL_H

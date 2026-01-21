@@ -167,29 +167,26 @@ int main(int argc, char* argv[]) {
         prompt, &token_count, &token, false, tokenizer->bos_token_id
     );
   } else {
-    tokenizer_tokenize(tokenizer, prompt, true, false, &token_count, &token);
+    bool add_bos = options->instruct ? false : true;
+    tokenizer_tokenize(tokenizer, prompt, add_bos, false, &token_count, &token);
   }
   if (token_count < 1) {
     UTIL_ERROR("expected at least 1 prompt token");
+  }
+  if (options->instruct) {
+    format_instruction_tokens_pre_tokenized(
+        &token_count, &token, safetensors->model_type
+    );
   }
   tokenizer_print_tokens(tokenizer, stderr, token_count, token, 4);
   fprintf(stderr, "\n");
 
   // Print the prompt string (in blue)
   fprintf(stderr, "\033[1;34m");
-  if (options->pre_tokenized) {
-    // For pre-tokenized input, decode and print the tokens (except BOS)
-    for (size_t i = 1; i < token_count; i++) {
-      char* decoded = tokenizer_decode(tokenizer, token[i]);
-      if (decoded) {
-        tokenizer_print_token_string(stderr, decoded);
-      }
-    }
-  } else {
-    // For text input, print as-is
-    while (*prompt) {
-      fprintf(stderr, "%c", *prompt);
-      prompt++;
+  for (size_t i = 0; i < token_count; i++) {
+    char* decoded = tokenizer_decode(tokenizer, token[i]);
+    if (decoded) {
+      tokenizer_print_token_string(stderr, decoded);
     }
   }
   fprintf(stderr, "\033[0m");

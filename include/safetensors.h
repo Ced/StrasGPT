@@ -52,6 +52,7 @@ typedef struct safetensors_tensor_t {
 
 typedef struct safetensors{
   // Model configuration
+  char* model_type;      // Model type string
   size_t embedding_dim;  // Token representation (embedding) dimension
   size_t head_dim;       // Dimensionality of each individual attention head
   size_t hidden_dim;     // Intermediate representation dimension in the FFN

@@ -26,6 +26,7 @@ options_t* options_malloc(void) {
   options->seed_is_set = false;
   options->show_model = false;
   options->show_safetensors = false;
+  options->instruct = false;
   return options;
 }
 
@@ -71,6 +72,7 @@ void options_print(FILE* f, const options_t* options) {
       "- show_safetensors: %s\n",
       options->show_safetensors ? "true" : "false"
   );
+  fprintf(f, "- instruct:         %s\n", options->instruct ? "true" : "false");
 }
 
 void option_usage(char* argv[], int status) {
@@ -79,6 +81,7 @@ void option_usage(char* argv[], int status) {
   fprintf(stderr, "Options:\n");
   fprintf(stderr, "  -f <path>       read prompt from file\n");
   fprintf(stderr, "  -h, --help      print usage and exit\n");
+  fprintf(stderr, "  --instruct      wrap prompt with instruction tokens\n");
   fprintf(stderr, "  -m <dir>        model directory (default ./)\n");
   fprintf(stderr, "  -n <int>        num of tokens to predict (default 256)\n");
   fprintf(stderr, "  -p <string>     input prompt\n");
@@ -112,6 +115,9 @@ options_t* options_read(int argc, char* argv[]) {
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       options_free(options);
       option_usage(argv, EXIT_SUCCESS);
+    } else if (strcmp(argv[i], "--instruct") == 0) {
+      options->instruct = true;
+      i--;
     } else if (strcmp(argv[i], "-m") == 0) {
       if (i + 1 < arg_count) {
         options->model_dir = argv[i + 1];
