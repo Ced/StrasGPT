@@ -8,6 +8,11 @@ struct safetensors;
 
 #define TRANSFORMER_CHUNK_MAX_LEN 512
 
+typedef enum {
+  TRANSFORMER_LAYER_TYPE_FA, // Full attention
+  TRANSFORMER_LAYER_TYPE_LA, // Linear attention
+} transformer_layer_type_t;
+
 typedef struct transformer_configuration {
   size_t embedding_dim;    // Token representation (embedding) dimension
   size_t head_dim;         // Dimensionality of each individual attention head
@@ -24,6 +29,15 @@ typedef struct transformer_configuration {
   size_t rope_pair_stride; // Interleaved: 2, half-split: 1
   size_t mrope_section_count; // Number of multi-scale RoPE section (0 if none)
   size_t* mrope_section;   // Sections for multi-scale RoPE (NULL if none)
+  transformer_layer_type_t* layer_types; // [layer_count]
+  size_t fa_layer_count;    // Number of full-attention layers
+  size_t la_layer_count;    // Number of linear-attention layers
+  size_t la_kernel_size;    // Linear-attention convolution kernel size
+  size_t la_k_head_dim;     // Linear-attention key head dimension
+  size_t la_k_head_count;   // Linear-attention key head count
+  size_t la_v_head_dim;     // Linear-attention value head dimension
+  size_t la_v_head_count;   // Linear-attention value head count
+  bool mha_output_gate;     // Full attention has a learned output gate
   bool aliased_out_weight; // True if out_weight is aliased to embedding_weight
 } transformer_configuration_t;
 
@@ -33,16 +47,27 @@ typedef struct transformer_weights {
   // Decoder parameter set
   // - Multi-head attention
   uint16_t* mha_norm_weight;   // [layer_count][embedding_dim]
-  uint16_t* mha_q_weight;      // [layer_count][q_head_count][
+  uint16_t* mha_q_weight;      // [fa_layer_count][q_head_count][
                                //  head_dim][embedding_dim]
-  uint16_t* mha_q_norm_weight; // [layer_count][head_dim]
-  uint16_t* mha_k_weight;      // [layer_count][kv_head_count][
+  uint16_t* mha_gate_weight;   // Optional, same shape as mha_q_weight
+  uint16_t* mha_q_norm_weight; // [fa_layer_count][head_dim]
+  uint16_t* mha_k_weight;      // [fa_layer_count][kv_head_count][
                                //  head_dim][embedding_dim]
-  uint16_t* mha_k_norm_weight; // [layer_count][head_dim]
-  uint16_t* mha_v_weight;      // [layer_count][kv_head_count][
+  uint16_t* mha_k_norm_weight; // [fa_layer_count][head_dim]
+  uint16_t* mha_v_weight;      // [fa_layer_count][kv_head_count][
                                //  head_dim][embedding_dim]
-  uint16_t* mha_out_weight;    // [layer_count][embedding_dim][
+  uint16_t* mha_out_weight;    // [fa_layer_count][embedding_dim][
                                //  q_head_count * head_dim]
+  // - Linear attention
+  uint16_t* la_qkv_weight;   // [la_layer_count][la_qkv_dim][embedding_dim]
+  uint16_t* la_gate_weight;  // [la_layer_count][la_v_dim][embedding_dim]
+  uint16_t* la_alpha_weight; // [la_layer_count][la_v_head_count][embedding_dim]
+  uint16_t* la_beta_weight;  // [la_layer_count][la_v_head_count][embedding_dim]
+  uint16_t* la_dt_bias;      // [la_layer_count][la_v_head_count]
+  float* la_decay_weight;    // [la_layer_count][la_v_head_count], -exp(A_log)
+  uint16_t* la_conv_weight;  // [la_layer_count][la_qkv_dim][la_kernel_size]
+  float* la_norm_weight;     // [la_layer_count][la_v_head_dim]
+  uint16_t* la_out_weight;   // [la_layer_count][embedding_dim][la_v_dim]
   // - Feed-forward network
   uint16_t* ffn_norm_weight;   // [layer_count][embedding_dim]
   uint16_t* ffn_fc_weight;     // [layer_count][embedding_dim][hidden_dim]

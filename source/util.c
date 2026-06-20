@@ -174,16 +174,16 @@ void util_matrix_summary_bf16(
       fprintf(stderr, "%6s: [", name ? name : "matrix"); \
       size_t i; \
       for (i = 0; i < sample_count && i < total; i++) { \
-        fprintf(stderr, "%6.3f ", (double)m[i]); \
+        fprintf(stderr, " %6.3f", (double)m[i]); \
       } \
       if (2 * sample_count < total) { \
-        fprintf(stderr, "... "); \
+        fprintf(stderr, " ..."); \
       } \
       size_t tail_start = (2 * sample_count < total) ? total - sample_count : i; \
       for (i = tail_start; i < total; i++) { \
-        fprintf(stderr, "%6.3f ", (double)m[i]); \
+        fprintf(stderr, " %6.3f", (double)m[i]); \
       } \
-      fprintf(stderr, "] "); \
+      fprintf(stderr, " ] "); \
       for (i = 0; i < total; i++) { \
         double val = (double)m[i]; \
         if (val < min) { \
@@ -195,8 +195,8 @@ void util_matrix_summary_bf16(
         sum += val; \
       } \
       double mean = sum / (double)total; \
-      fprintf(stderr, "min=%8.3f max=%8.3f ", min, max); \
-      fprintf(stderr, "mean=%8.3f sum=%8.3f\n", mean, sum); \
+      fprintf(stderr, "min=%6.3f max=%6.3f ", min, max); \
+      fprintf(stderr, "mean=%6.3f sum=%6.3f\n", mean, sum); \
     }
 
 DEFINE_UTIL_MATRIX_SUMMARY(float, util_matrix_summary_fp32)

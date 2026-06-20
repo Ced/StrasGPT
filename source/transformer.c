@@ -53,6 +53,27 @@ static transformer_configuration_t* configuration_from_safetensors(
   } else {
     config->mrope_section = NULL;
   }
+  size_t layer_types_size =
+      config->layer_count * sizeof(*config->layer_types);
+  config->layer_types = malloc(layer_types_size);
+  if (config->layer_types == NULL) {
+    UTIL_DIE("failed to malloc for layer_types");
+  }
+  for (size_t i = 0; i < config->layer_count; i++) {
+    if (safetensors->layer_types[i] == SAFETENSORS_LAYER_TYPE_LA) {
+      config->layer_types[i] = TRANSFORMER_LAYER_TYPE_LA;
+      config->la_layer_count++;
+    } else {
+      config->layer_types[i] = TRANSFORMER_LAYER_TYPE_FA;
+      config->fa_layer_count++;
+    }
+  }
+  config->la_kernel_size = safetensors->la_kernel_size;
+  config->la_k_head_dim = safetensors->la_k_head_dim;
+  config->la_k_head_count = safetensors->la_k_head_count;
+  config->la_v_head_dim = safetensors->la_v_head_dim;
+  config->la_v_head_count = safetensors->la_v_head_count;
+  config->mha_output_gate = safetensors->mha_output_gate;
   config->aliased_out_weight = safetensors_aliased_out_weight(safetensors);
   return config;
 }
@@ -207,6 +228,26 @@ static bool match_name(const char* name, const char* pattern, size_t* index) {
   return true;
 }
 
+// Return the compact index of a full- or linear-attention layer.
+static size_t layer_type_index(
+    const safetensors_t* safetensors,
+    size_t layer,
+    safetensors_layer_type_t layer_type
+) {
+  if (layer >= safetensors->layer_count ||
+      safetensors->layer_types[layer] != layer_type) {
+    UTIL_DIE("tensor does not match configured layer type");
+  }
+
+  size_t index = 0;
+  for (size_t i = 0; i < layer; i++) {
+    if (safetensors->layer_types[i] == layer_type) {
+      index++;
+    }
+  }
+  return index;
+}
+
 // Load data from a file at a given offset into a storage buffer
 static void load_data(
     const char* file, size_t offset, size_t size, void* storage
@@ -276,9 +317,11 @@ static void load_mha_q_weight(
     size_t index,
     transformer_weights_t* weights
 ) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_FA);
   size_t qkv_weight_dim = safetensors->head_dim * safetensors->embedding_dim;
   size_t len = safetensors->q_head_count * qkv_weight_dim;
-  if (tensor->size != len * sizeof(*weights->mha_q_weight)) {
+  size_t size = len * sizeof(*weights->mha_q_weight);
+  if (tensor->size != size) {
     UTIL_DIE("unexpected size for mha q weight");
   }
 
@@ -290,12 +333,56 @@ static void load_mha_q_weight(
   );
 }
 
+static void load_mha_q_gate_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_FA);
+  size_t head_len = safetensors->head_dim * safetensors->embedding_dim;
+  size_t len = safetensors->q_head_count * head_len;
+  size_t size = 2 * len * sizeof(*weights->mha_q_weight);
+  if (tensor->size != size) {
+    UTIL_DIE("unexpected size for gated mha q weight");
+  }
+  if (weights->mha_gate_weight == NULL) {
+    UTIL_DIE("missing storage for gated mha q weight");
+  }
+
+  // Qwen3.5 stores Q and its output gate in one q_proj tensor. We unpack
+  // consecutive row blocks as [head 0 Q, head 0 gate, head 1 Q, head 1 gate,
+  // ...], preserving the usual per-head layout in the two destination arrays.
+  // TODO: confirm packing order.
+  uint16_t* q_gate = malloc(tensor->size);
+  if (q_gate == NULL) {
+    UTIL_DIE("failed to malloc temporary gated mha q weight");
+  }
+  load_data(
+      safetensors->file[tensor->file], tensor->offset, tensor->size, q_gate
+  );
+  for (size_t h = 0; h < safetensors->q_head_count; h++) {
+    memcpy(
+        &weights->mha_q_weight[index * len + h * head_len],
+        &q_gate[2 * h * head_len],
+        head_len * sizeof(*q_gate)
+    );
+    memcpy(
+        &weights->mha_gate_weight[index * len + h * head_len],
+        &q_gate[(2 * h + 1) * head_len],
+        head_len * sizeof(*q_gate)
+    );
+  }
+  free(q_gate);
+}
+
 static void load_mha_q_norm_weight(
     const safetensors_t* safetensors,
     const safetensors_tensor_t* tensor,
     size_t index,
     transformer_weights_t* weights
 ) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_FA);
   size_t len = safetensors->head_dim;
   if (tensor->size != len * sizeof(*weights->mha_q_norm_weight)) {
     UTIL_DIE("unexpected size for mha q norm weight");
@@ -315,6 +402,7 @@ static void load_mha_k_weight(
     size_t index,
     transformer_weights_t* weights
 ) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_FA);
   size_t qkv_weight_dim = safetensors->head_dim * safetensors->embedding_dim;
   size_t len = safetensors->kv_head_count * qkv_weight_dim;
   if (tensor->size != len * sizeof(*weights->mha_k_weight)) {
@@ -341,6 +429,7 @@ static void load_mha_k_norm_weight(
     size_t index,
     transformer_weights_t* weights
 ) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_FA);
   size_t len = safetensors->head_dim;
   if (tensor->size != len * sizeof(*weights->mha_k_norm_weight)) {
     UTIL_DIE("unexpected size for mha q norm weight");
@@ -360,6 +449,7 @@ static void load_mha_v_weight(
     size_t index,
     transformer_weights_t* weights
 ) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_FA);
   size_t qkv_weight_dim = safetensors->head_dim * safetensors->embedding_dim;
   size_t len = safetensors->kv_head_count * qkv_weight_dim;
   if (tensor->size != len * sizeof(*weights->mha_v_weight)) {
@@ -380,6 +470,7 @@ static void load_mha_out_weight(
     size_t index,
     transformer_weights_t* weights
 ) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_FA);
   size_t mha_out_dim = safetensors->q_head_count * safetensors->head_dim;
   size_t len = safetensors->embedding_dim * mha_out_dim;
   if (tensor->size != len * sizeof(*weights->mha_out_weight)) {
@@ -391,6 +482,192 @@ static void load_mha_out_weight(
       tensor->offset,
       tensor->size,
       &weights->mha_out_weight[index * len]
+  );
+}
+
+static size_t la_qkv_dim(const safetensors_t* safetensors) {
+  return 2 * safetensors->la_k_head_count * safetensors->la_k_head_dim +
+         safetensors->la_v_head_count * safetensors->la_v_head_dim;
+}
+
+static size_t la_v_dim(const safetensors_t* safetensors) {
+  return safetensors->la_v_head_count * safetensors->la_v_head_dim;
+}
+
+static void load_la_qkv_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_LA);
+  size_t len = la_qkv_dim(safetensors) * safetensors->embedding_dim;
+  if (tensor->size != len * sizeof(*weights->la_qkv_weight)) {
+    UTIL_DIE("unexpected size for linear attention qkv weight");
+  }
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->la_qkv_weight[index * len]
+  );
+}
+
+static void load_la_gate_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_LA);
+  size_t len = la_v_dim(safetensors) * safetensors->embedding_dim;
+  if (tensor->size != len * sizeof(*weights->la_gate_weight)) {
+    UTIL_DIE("unexpected size for linear attention gate weight");
+  }
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->la_gate_weight[index * len]
+  );
+}
+
+static void load_la_alpha_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_LA);
+  size_t len = safetensors->la_v_head_count * safetensors->embedding_dim;
+  if (tensor->size != len * sizeof(*weights->la_alpha_weight)) {
+    UTIL_DIE("unexpected size for linear attention alpha weight");
+  }
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->la_alpha_weight[index * len]
+  );
+}
+
+static void load_la_beta_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_LA);
+  size_t len = safetensors->la_v_head_count * safetensors->embedding_dim;
+  if (tensor->size != len * sizeof(*weights->la_beta_weight)) {
+    UTIL_DIE("unexpected size for linear attention beta weight");
+  }
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->la_beta_weight[index * len]
+  );
+}
+
+static void load_la_dt_bias(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_LA);
+  size_t len = safetensors->la_v_head_count;
+  if (tensor->size != len * sizeof(*weights->la_dt_bias)) {
+    UTIL_DIE("unexpected size for linear attention dt bias");
+  }
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->la_dt_bias[index * len]
+  );
+}
+
+static void load_la_decay_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_LA);
+  size_t len = safetensors->la_v_head_count;
+  if (tensor->type != SAFETENSORS_TYPE_F32 ||
+      tensor->size != len * sizeof(*weights->la_decay_weight)) {
+    UTIL_DIE("unexpected type or size for linear attention decay weight");
+  }
+  float* decay = &weights->la_decay_weight[index * len];
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      decay
+  );
+  for (size_t i = 0; i < len; i++) {
+    decay[i] = -expf(decay[i]);
+  }
+}
+
+static void load_la_conv_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_LA);
+  size_t len = la_qkv_dim(safetensors) * safetensors->la_kernel_size;
+  if (tensor->size != len * sizeof(*weights->la_conv_weight)) {
+    UTIL_DIE("unexpected size for linear attention convolution weight");
+  }
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->la_conv_weight[index * len]
+  );
+}
+
+static void load_la_norm_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_LA);
+  size_t len = safetensors->la_v_head_dim;
+  if (tensor->type != SAFETENSORS_TYPE_F32 ||
+      tensor->size != len * sizeof(*weights->la_norm_weight)) {
+    UTIL_DIE("unexpected type or size for linear attention norm weight");
+  }
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->la_norm_weight[index * len]
+  );
+}
+
+static void load_la_out_weight(
+    const safetensors_t* safetensors,
+    const safetensors_tensor_t* tensor,
+    size_t index,
+    transformer_weights_t* weights
+) {
+  index = layer_type_index(safetensors, index, SAFETENSORS_LAYER_TYPE_LA);
+  size_t len = safetensors->embedding_dim * la_v_dim(safetensors);
+  if (tensor->size != len * sizeof(*weights->la_out_weight)) {
+    UTIL_DIE("unexpected size for linear attention output weight");
+  }
+  load_data(
+      safetensors->file[tensor->file],
+      tensor->offset,
+      tensor->size,
+      &weights->la_out_weight[index * len]
   );
 }
 
@@ -537,6 +814,25 @@ static const char* normalize_name(const char* name, size_t out_len, char* out) {
        "model.language_model.layers.%d.self_attn.v_proj.weight"},
       {SAFETENSORS_PATTERN_MHA_OUT_WEIGHT,
        "model.language_model.layers.%d.self_attn.o_proj.weight"},
+      // Linear attention tensor name aliases
+      {SAFETENSORS_PATTERN_LA_QKV_WEIGHT,
+       "model.language_model.layers.%d.linear_attn.in_proj_qkv.weight"},
+      {SAFETENSORS_PATTERN_LA_GATE_WEIGHT,
+       "model.language_model.layers.%d.linear_attn.in_proj_z.weight"},
+      {SAFETENSORS_PATTERN_LA_ALPHA_WEIGHT,
+       "model.language_model.layers.%d.linear_attn.in_proj_a.weight"},
+      {SAFETENSORS_PATTERN_LA_BETA_WEIGHT,
+       "model.language_model.layers.%d.linear_attn.in_proj_b.weight"},
+      {SAFETENSORS_PATTERN_LA_DT_BIAS,
+       "model.language_model.layers.%d.linear_attn.dt_bias"},
+      {SAFETENSORS_PATTERN_LA_DECAY_WEIGHT,
+       "model.language_model.layers.%d.linear_attn.A_log"},
+      {SAFETENSORS_PATTERN_LA_CONV_WEIGHT,
+       "model.language_model.layers.%d.linear_attn.conv1d.weight"},
+      {SAFETENSORS_PATTERN_LA_NORM_WEIGHT,
+       "model.language_model.layers.%d.linear_attn.norm.weight"},
+      {SAFETENSORS_PATTERN_LA_OUT_WEIGHT,
+       "model.language_model.layers.%d.linear_attn.out_proj.weight"},
       // Feed-forward network tensor name aliases
       {SAFETENSORS_PATTERN_FFN_NORM_WEIGHT,
        "model.language_model.layers.%d.post_attention_layernorm.weight"},
@@ -594,12 +890,24 @@ static bool tensor_load(
   const tensor_load_t loading_table[] = {
       {SAFETENSORS_PATTERN_EMBEDDING_WEIGHT, load_embedding_weight},
       {SAFETENSORS_PATTERN_MHA_NORM_WEIGHT, load_mha_norm_weight},
-      {SAFETENSORS_PATTERN_MHA_Q_WEIGHT, load_mha_q_weight},
+      {SAFETENSORS_PATTERN_MHA_Q_WEIGHT,
+       safetensors->mha_output_gate
+           ? load_mha_q_gate_weight
+           : load_mha_q_weight},
       {SAFETENSORS_PATTERN_MHA_Q_NORM_WEIGHT, load_mha_q_norm_weight},
       {SAFETENSORS_PATTERN_MHA_K_WEIGHT, load_mha_k_weight},
       {SAFETENSORS_PATTERN_MHA_K_NORM_WEIGHT, load_mha_k_norm_weight},
       {SAFETENSORS_PATTERN_MHA_V_WEIGHT, load_mha_v_weight},
       {SAFETENSORS_PATTERN_MHA_OUT_WEIGHT, load_mha_out_weight},
+      {SAFETENSORS_PATTERN_LA_QKV_WEIGHT, load_la_qkv_weight},
+      {SAFETENSORS_PATTERN_LA_GATE_WEIGHT, load_la_gate_weight},
+      {SAFETENSORS_PATTERN_LA_ALPHA_WEIGHT, load_la_alpha_weight},
+      {SAFETENSORS_PATTERN_LA_BETA_WEIGHT, load_la_beta_weight},
+      {SAFETENSORS_PATTERN_LA_DT_BIAS, load_la_dt_bias},
+      {SAFETENSORS_PATTERN_LA_DECAY_WEIGHT, load_la_decay_weight},
+      {SAFETENSORS_PATTERN_LA_CONV_WEIGHT, load_la_conv_weight},
+      {SAFETENSORS_PATTERN_LA_NORM_WEIGHT, load_la_norm_weight},
+      {SAFETENSORS_PATTERN_LA_OUT_WEIGHT, load_la_out_weight},
       {SAFETENSORS_PATTERN_FFN_NORM_WEIGHT, load_ffn_norm_weight},
       {SAFETENSORS_PATTERN_FFN_FC_WEIGHT, load_ffn_fc_weight},
       {SAFETENSORS_PATTERN_FFN_UP_WEIGHT, load_ffn_up_weight},
@@ -646,15 +954,43 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
     UTIL_DIE("failed to malloc for transformer_weights_t");
   }
 
+  size_t fa_layer_count = 0;
+  size_t la_layer_count = 0;
+  bool mha_output_gate = t->mha_output_gate;
+  for (size_t i = 0; i < t->layer_count; i++) {
+    if (t->layer_types[i] == SAFETENSORS_LAYER_TYPE_LA) {
+      la_layer_count++;
+    } else {
+      fa_layer_count++;
+    }
+  }
+
   size_t qkv_weight_dim = t->head_dim * t->embedding_dim;
+  size_t linear_qkv_dim = la_qkv_dim(t);
+  size_t linear_v_dim = la_v_dim(t);
 
   size_t embedding_len = t->vocabulary_len * t->embedding_dim;
   size_t mha_norm_len = t->layer_count * t->embedding_dim;
-  size_t mha_q_len = t->layer_count * t->q_head_count * qkv_weight_dim;
-  size_t mha_qk_norm_len = t->layer_count * t->head_dim;
-  size_t mha_kv_len = t->layer_count * t->kv_head_count * qkv_weight_dim;
+  size_t mha_q_len = fa_layer_count * t->q_head_count * qkv_weight_dim;
+  size_t mha_qk_norm_len = fa_layer_count * t->head_dim;
+  size_t mha_kv_len = fa_layer_count * t->kv_head_count * qkv_weight_dim;
   size_t mha_out_dim = t->q_head_count * t->head_dim;
-  size_t mha_out_len = t->layer_count * t->embedding_dim * mha_out_dim;
+  size_t mha_out_len = fa_layer_count * t->embedding_dim * mha_out_dim;
+  size_t la_qkv_len =
+      la_layer_count * linear_qkv_dim * t->embedding_dim;
+  size_t la_gate_len =
+      la_layer_count * linear_v_dim * t->embedding_dim;
+  size_t la_alpha_len =
+      la_layer_count * t->la_v_head_count * t->embedding_dim;
+  size_t la_beta_len =
+      la_layer_count * t->la_v_head_count * t->embedding_dim;
+  size_t la_dt_len = la_layer_count * t->la_v_head_count;
+  size_t la_decay_len = la_layer_count * t->la_v_head_count;
+  size_t la_conv_len =
+      la_layer_count * linear_qkv_dim * t->la_kernel_size;
+  size_t la_norm_len = la_layer_count * t->la_v_head_dim;
+  size_t la_out_len =
+      la_layer_count * t->embedding_dim * linear_v_dim;
   size_t ffn_norm_len = t->layer_count * t->embedding_dim;
   size_t ffn_fc_len = t->layer_count * t->embedding_dim * t->hidden_dim;
   size_t ffn_up_len = t->layer_count * t->embedding_dim * t->hidden_dim;
@@ -668,6 +1004,15 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   size_t mha_qk_norm_size = mha_qk_norm_len * sizeof(*w->mha_q_norm_weight);
   size_t mha_kv_size = mha_kv_len * sizeof(*w->mha_k_weight);
   size_t mha_out_size = mha_out_len * sizeof(*w->mha_out_weight);
+  size_t la_qkv_size = la_qkv_len * sizeof(*w->la_qkv_weight);
+  size_t la_gate_size = la_gate_len * sizeof(*w->la_gate_weight);
+  size_t la_alpha_size = la_alpha_len * sizeof(*w->la_alpha_weight);
+  size_t la_beta_size = la_beta_len * sizeof(*w->la_beta_weight);
+  size_t la_dt_size = la_dt_len * sizeof(*w->la_dt_bias);
+  size_t la_decay_size = la_decay_len * sizeof(*w->la_decay_weight);
+  size_t la_conv_size = la_conv_len * sizeof(*w->la_conv_weight);
+  size_t la_norm_size = la_norm_len * sizeof(*w->la_norm_weight);
+  size_t la_out_size = la_out_len * sizeof(*w->la_out_weight);
   size_t ffn_norm_size = ffn_norm_len * sizeof(*w->ffn_norm_weight);
   size_t ffn_fc_size = ffn_fc_len * sizeof(*w->ffn_fc_weight);
   size_t fn_up_size = ffn_up_len * sizeof(*w->ffn_up_weight);
@@ -677,10 +1022,26 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
 
   w->embedding_weight = aligned_alloc(UTIL_ALIGNMENT, embedding_size);
   w->mha_norm_weight = aligned_alloc(UTIL_ALIGNMENT, mha_norm_size);
-  w->mha_q_weight = aligned_alloc(UTIL_ALIGNMENT, mha_q_size);
-  w->mha_k_weight = aligned_alloc(UTIL_ALIGNMENT, mha_kv_size);
-  w->mha_v_weight = aligned_alloc(UTIL_ALIGNMENT, mha_kv_size);
-  w->mha_out_weight = aligned_alloc(UTIL_ALIGNMENT, mha_out_size);
+  if (fa_layer_count > 0) {
+    w->mha_q_weight = aligned_alloc(UTIL_ALIGNMENT, mha_q_size);
+    if (mha_output_gate) {
+      w->mha_gate_weight = aligned_alloc(UTIL_ALIGNMENT, mha_q_size);
+    }
+    w->mha_k_weight = aligned_alloc(UTIL_ALIGNMENT, mha_kv_size);
+    w->mha_v_weight = aligned_alloc(UTIL_ALIGNMENT, mha_kv_size);
+    w->mha_out_weight = aligned_alloc(UTIL_ALIGNMENT, mha_out_size);
+  }
+  if (la_layer_count > 0) {
+    w->la_qkv_weight = aligned_alloc(UTIL_ALIGNMENT, la_qkv_size);
+    w->la_gate_weight = aligned_alloc(UTIL_ALIGNMENT, la_gate_size);
+    w->la_alpha_weight = aligned_alloc(UTIL_ALIGNMENT, la_alpha_size);
+    w->la_beta_weight = aligned_alloc(UTIL_ALIGNMENT, la_beta_size);
+    w->la_dt_bias = aligned_alloc(UTIL_ALIGNMENT, la_dt_size);
+    w->la_decay_weight = aligned_alloc(UTIL_ALIGNMENT, la_decay_size);
+    w->la_conv_weight = aligned_alloc(UTIL_ALIGNMENT, la_conv_size);
+    w->la_norm_weight = aligned_alloc(UTIL_ALIGNMENT, la_norm_size);
+    w->la_out_weight = aligned_alloc(UTIL_ALIGNMENT, la_out_size);
+  }
   w->ffn_norm_weight = aligned_alloc(UTIL_ALIGNMENT, ffn_norm_size);
   w->ffn_fc_weight = aligned_alloc(UTIL_ALIGNMENT, ffn_fc_size);
   w->ffn_up_weight = aligned_alloc(UTIL_ALIGNMENT, fn_up_size);
@@ -693,7 +1054,7 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
     w->out_weight = aligned_alloc(UTIL_ALIGNMENT, out_size);
   }
   bool qk_normalization = has_qk_norm(t);
-  if (qk_normalization) {
+  if (qk_normalization && fa_layer_count > 0) {
     w->mha_q_norm_weight = aligned_alloc(UTIL_ALIGNMENT, mha_qk_norm_size);
     w->mha_k_norm_weight = aligned_alloc(UTIL_ALIGNMENT, mha_qk_norm_size);
   }
@@ -701,10 +1062,20 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   // Ensure all mallocs went fine
   if (!w->embedding_weight ||
       !w->mha_norm_weight ||
-      !w->mha_q_weight ||
-      !w->mha_k_weight ||
-      !w->mha_v_weight ||
-      !w->mha_out_weight ||
+      (fa_layer_count > 0 && !w->mha_q_weight) ||
+      (mha_output_gate && !w->mha_gate_weight) ||
+      (fa_layer_count > 0 && !w->mha_k_weight) ||
+      (fa_layer_count > 0 && !w->mha_v_weight) ||
+      (fa_layer_count > 0 && !w->mha_out_weight) ||
+      (la_layer_count > 0 && !w->la_qkv_weight) ||
+      (la_layer_count > 0 && !w->la_gate_weight) ||
+      (la_layer_count > 0 && !w->la_alpha_weight) ||
+      (la_layer_count > 0 && !w->la_beta_weight) ||
+      (la_layer_count > 0 && !w->la_dt_bias) ||
+      (la_layer_count > 0 && !w->la_decay_weight) ||
+      (la_layer_count > 0 && !w->la_conv_weight) ||
+      (la_layer_count > 0 && !w->la_norm_weight) ||
+      (la_layer_count > 0 && !w->la_out_weight) ||
       !w->ffn_norm_weight ||
       !w->ffn_fc_weight ||
       !w->ffn_up_weight ||
@@ -753,11 +1124,21 @@ void transformer_free(transformer_t* transformer) {
   free(w->embedding_weight);
   free(w->mha_norm_weight);
   free(w->mha_q_weight);
+  free(w->mha_gate_weight);
   free(w->mha_q_norm_weight);
   free(w->mha_k_weight);
   free(w->mha_k_norm_weight);
   free(w->mha_v_weight);
   free(w->mha_out_weight);
+  free(w->la_qkv_weight);
+  free(w->la_gate_weight);
+  free(w->la_alpha_weight);
+  free(w->la_beta_weight);
+  free(w->la_dt_bias);
+  free(w->la_decay_weight);
+  free(w->la_conv_weight);
+  free(w->la_norm_weight);
+  free(w->la_out_weight);
   free(w->ffn_norm_weight);
   free(w->ffn_fc_weight);
   free(w->ffn_up_weight);
@@ -785,6 +1166,7 @@ void transformer_free(transformer_t* transformer) {
   free(s);
 
   free(c->mrope_section);
+  free(c->layer_types);
   free(c);
 
   free(transformer);
@@ -802,11 +1184,43 @@ double transformer_layer_size_gb(
 
   transformer_configuration_t* c = transformer->config;
 
+  size_t fa_layer_count = 0;
+  size_t la_layer_count = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (c->layer_types[i] == TRANSFORMER_LAYER_TYPE_LA) {
+      la_layer_count++;
+    } else {
+      fa_layer_count++;
+    }
+  }
+
   size_t mha_norm_len = n * c->embedding_dim;
-  size_t mha_q_len = n * c->q_head_count * c->head_dim * c->embedding_dim;
-  size_t mha_qk_norm_len = n * c->head_dim;
-  size_t mha_kv_len = n * c->kv_head_count * c->head_dim * c->embedding_dim;
-  size_t mha_out_len = n * c->q_head_count * c->head_dim * c->embedding_dim;
+  size_t mha_q_len =
+      fa_layer_count * c->q_head_count * c->head_dim * c->embedding_dim;
+  size_t mha_qk_norm_len = fa_layer_count * c->head_dim;
+  size_t mha_kv_len =
+      fa_layer_count * c->kv_head_count * c->head_dim * c->embedding_dim;
+  size_t mha_out_len =
+      fa_layer_count * c->q_head_count * c->head_dim * c->embedding_dim;
+  size_t linear_qkv_dim =
+      2 * c->la_k_head_count * c->la_k_head_dim +
+      c->la_v_head_count * c->la_v_head_dim;
+  size_t linear_v_dim = c->la_v_head_count * c->la_v_head_dim;
+  size_t la_qkv_len =
+      la_layer_count * linear_qkv_dim * c->embedding_dim;
+  size_t la_gate_len =
+      la_layer_count * linear_v_dim * c->embedding_dim;
+  size_t la_alpha_len =
+      la_layer_count * c->la_v_head_count * c->embedding_dim;
+  size_t la_beta_len =
+      la_layer_count * c->la_v_head_count * c->embedding_dim;
+  size_t la_dt_len = la_layer_count * c->la_v_head_count;
+  size_t la_decay_len = la_layer_count * c->la_v_head_count;
+  size_t la_conv_len =
+      la_layer_count * linear_qkv_dim * c->la_kernel_size;
+  size_t la_norm_len = la_layer_count * c->la_v_head_dim;
+  size_t la_out_len =
+      la_layer_count * c->embedding_dim * linear_v_dim;
   size_t ffn_norm_len = n * c->embedding_dim;
   size_t ffn_fc_len = n * c->embedding_dim * c->hidden_dim;
   size_t ffn_up_len = n * c->embedding_dim * c->hidden_dim;
@@ -816,46 +1230,91 @@ double transformer_layer_size_gb(
   double gb = 1024 * 1024 * 1024;
   double mha_norm_gb = (mha_norm_len * sizeof(*w->mha_norm_weight)) / gb;
   double mha_q_gb = (mha_q_len * sizeof(*w->mha_q_weight)) / gb;
+  double mha_gate_gb = (mha_q_len * sizeof(*w->mha_gate_weight)) / gb;
   double mha_q_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_q_norm_weight)) / gb;
   double mha_k_gb = (mha_kv_len * sizeof(*w->mha_k_weight)) / gb;
   double mha_k_norm_gb = (mha_qk_norm_len * sizeof(*w->mha_k_norm_weight)) / gb;
   double mha_v_gb = (mha_kv_len * sizeof(*w->mha_v_weight)) / gb;
   double mha_out_gb = (mha_out_len * sizeof(*w->mha_out_weight)) / gb;
+  double la_qkv_gb = (la_qkv_len * sizeof(*w->la_qkv_weight)) / gb;
+  double la_gate_gb = (la_gate_len * sizeof(*w->la_gate_weight)) / gb;
+  double la_alpha_gb = (la_alpha_len * sizeof(*w->la_alpha_weight)) / gb;
+  double la_beta_gb = (la_beta_len * sizeof(*w->la_beta_weight)) / gb;
+  double la_dt_gb = (la_dt_len * sizeof(*w->la_dt_bias)) / gb;
+  double la_decay_gb = (la_decay_len * sizeof(*w->la_decay_weight)) / gb;
+  double la_conv_gb = (la_conv_len * sizeof(*w->la_conv_weight)) / gb;
+  double la_norm_gb = (la_norm_len * sizeof(*w->la_norm_weight)) / gb;
+  double la_out_gb = (la_out_len * sizeof(*w->la_out_weight)) / gb;
   double ffn_norm_gb = (ffn_norm_len * sizeof(*w->ffn_norm_weight)) / gb;
   double ffn_fc_gb = (ffn_fc_len * sizeof(*w->ffn_fc_weight)) / gb;
   double ffn_up_gb = (ffn_up_len * sizeof(*w->ffn_up_weight)) / gb;
   double ffn_out_gb = (ffn_out_len * sizeof(*w->ffn_out_weight)) / gb;
   double total_gb = mha_norm_gb + mha_q_gb + mha_k_gb + mha_v_gb +
-                    mha_out_gb + ffn_norm_gb + ffn_fc_gb + ffn_up_gb +
-                    ffn_out_gb;
+                    mha_out_gb + la_qkv_gb + la_gate_gb + la_alpha_gb +
+                    la_beta_gb + la_dt_gb + la_decay_gb + la_conv_gb +
+                    la_norm_gb + la_out_gb + ffn_norm_gb + ffn_fc_gb +
+                    ffn_up_gb + ffn_out_gb;
 
   char s[SAFETENSORS_MAX_STRING];
   snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_norm", mha_norm_gb);
   util_matrix_summary(s, 1, mha_norm_len, 3, w->mha_norm_weight);
 
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q", mha_q_gb);
-  util_matrix_summary(s, 1, mha_q_len, 3, w->mha_q_weight);
+  if (fa_layer_count > 0) {
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q", mha_q_gb);
+    util_matrix_summary(s, 1, mha_q_len, 3, w->mha_q_weight);
 
-  if (w->mha_q_norm_weight) {
-    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q_norm", mha_q_norm_gb);
-    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_q_norm_weight);
-    total_gb += mha_q_norm_gb;
+    if (w->mha_gate_weight) {
+      snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_gate", mha_gate_gb);
+      util_matrix_summary(s, 1, mha_q_len, 3, w->mha_gate_weight);
+      total_gb += mha_gate_gb;
+    }
+
+    if (w->mha_q_norm_weight) {
+      snprintf(
+          s, sizeof(s), "--- %10s (%7.4f GB)", "mha_q_norm", mha_q_norm_gb
+      );
+      util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_q_norm_weight);
+      total_gb += mha_q_norm_gb;
+    }
+
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k", mha_k_gb);
+    util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
+
+    if (w->mha_k_norm_weight) {
+      snprintf(
+          s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k_norm", mha_k_norm_gb
+      );
+      util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_k_norm_weight);
+      total_gb += mha_k_norm_gb;
+    }
+
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_v", mha_v_gb);
+    util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_v_weight);
+
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_out", mha_out_gb);
+    util_matrix_summary(s, 1, mha_out_len, 3, w->mha_out_weight);
   }
 
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k", mha_k_gb);
-  util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_k_weight);
-
-  if (w->mha_k_norm_weight) {
-    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_k_norm", mha_k_norm_gb);
-    util_matrix_summary(s, 1, mha_qk_norm_len, 3, w->mha_k_norm_weight);
-    total_gb += mha_k_norm_gb;
+  if (la_layer_count > 0) {
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "la_qkv", la_qkv_gb);
+    util_matrix_summary(s, 1, la_qkv_len, 3, w->la_qkv_weight);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "la_gate", la_gate_gb);
+    util_matrix_summary(s, 1, la_gate_len, 3, w->la_gate_weight);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "la_alpha", la_alpha_gb);
+    util_matrix_summary(s, 1, la_alpha_len, 3, w->la_alpha_weight);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "la_beta", la_beta_gb);
+    util_matrix_summary(s, 1, la_beta_len, 3, w->la_beta_weight);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "la_dt", la_dt_gb);
+    util_matrix_summary(s, 1, la_dt_len, 3, w->la_dt_bias);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "la_decay", la_decay_gb);
+    util_matrix_summary(s, 1, la_decay_len, 3, w->la_decay_weight);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "la_conv", la_conv_gb);
+    util_matrix_summary(s, 1, la_conv_len, 3, w->la_conv_weight);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "la_norm", la_norm_gb);
+    util_matrix_summary(s, 1, la_norm_len, 3, w->la_norm_weight);
+    snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "la_out", la_out_gb);
+    util_matrix_summary(s, 1, la_out_len, 3, w->la_out_weight);
   }
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_v", mha_v_gb);
-  util_matrix_summary(s, 1, mha_kv_len, 3, w->mha_v_weight);
-
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_out", mha_out_gb);
-  util_matrix_summary(s, 1, mha_out_len, 3, w->mha_out_weight);
 
   snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "ffn_norm", ffn_norm_gb);
   util_matrix_summary(s, 1, ffn_norm_len, 3, w->ffn_norm_weight);
@@ -887,8 +1346,32 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   fprintf(f, "--- head_dim:           %zu\n", c->head_dim);
   fprintf(f, "--- hidden_dim:         %zu\n", c->hidden_dim);
   fprintf(f, "--- layer_count:        %zu\n", c->layer_count);
+  fprintf(f, "--- layer_types:        [");
+  for (size_t i = 0; i < c->layer_count; i++) {
+    fprintf(
+        f,
+        "%s%s",
+        c->layer_types[i] == TRANSFORMER_LAYER_TYPE_LA ? "LA" : "FA",
+        i + 1 == c->layer_count ? "]\n" : ", "
+    );
+  }
+  if (c->layer_count == 0) {
+    fprintf(f, "]\n");
+  }
+  fprintf(f, "--- fa_layer_count:     %zu\n", c->fa_layer_count);
+  fprintf(f, "--- la_layer_count:     %zu\n", c->la_layer_count);
   fprintf(f, "--- q_head_count:       %zu\n", c->q_head_count);
   fprintf(f, "--- kv_head_count:      %zu\n", c->kv_head_count);
+  fprintf(f, "--- la_kernel_size:     %zu\n", c->la_kernel_size);
+  fprintf(f, "--- la_k_head_dim:      %zu\n", c->la_k_head_dim);
+  fprintf(f, "--- la_k_head_count:    %zu\n", c->la_k_head_count);
+  fprintf(f, "--- la_v_head_dim:      %zu\n", c->la_v_head_dim);
+  fprintf(f, "--- la_v_head_count:    %zu\n", c->la_v_head_count);
+  fprintf(
+      f,
+      "--- mha_output_gate:    %s\n",
+      c->mha_output_gate ? "true" : "false"
+  );
   fprintf(f, "--- vocabulary_len:     %zu\n", c->vocabulary_len);
   fprintf(f, "--- context_len:        %zu\n", c->context_len);
   fprintf(f, "--- epsilon:            %g\n", c->epsilon);
@@ -1191,12 +1674,22 @@ static void transformer_predict_chunk(
     size_t vocabulary_len,
     size_t context_len,
     size_t layer_count,
+    transformer_layer_type_t layer_types[restrict layer_count],
+    size_t fa_layer_count,
+    size_t la_layer_count,
     size_t q_head_count,
     size_t kv_head_count,
     size_t q_head_per_kv_head_count,
     size_t embedding_dim,
     size_t head_dim,
     size_t hidden_dim,
+    size_t la_kernel_size,
+    size_t la_k_head_dim,
+    size_t la_k_head_count,
+    size_t la_v_head_dim,
+    size_t la_v_head_count,
+    size_t la_qkv_dim,
+    bool mha_output_gate,
     size_t rope_pair_bound,
     size_t rope_pair_offset,
     size_t rope_pair_stride,
@@ -1204,16 +1697,32 @@ static void transformer_predict_chunk(
     // Weights
     uint16_t embedding_weight[restrict vocabulary_len][embedding_dim],
     uint16_t mha_norm_weight[restrict layer_count][embedding_dim],
-    uint16_t mha_q_weight[restrict layer_count][kv_head_count]
+    uint16_t mha_q_weight[restrict fa_layer_count][kv_head_count]
                          [q_head_per_kv_head_count][head_dim][embedding_dim],
-    uint16_t mha_q_norm_weight[restrict layer_count][head_dim],
-    uint16_t mha_k_weight[restrict layer_count][kv_head_count][head_dim]
+    uint16_t mha_gate_weight[restrict fa_layer_count][kv_head_count]
+                            [q_head_per_kv_head_count][head_dim][embedding_dim],
+    uint16_t mha_q_norm_weight[restrict fa_layer_count][head_dim],
+    uint16_t mha_k_weight[restrict fa_layer_count][kv_head_count][head_dim]
                          [embedding_dim],
-    uint16_t mha_k_norm_weight[restrict layer_count][head_dim],
-    uint16_t mha_v_weight[restrict layer_count][kv_head_count][head_dim]
+    uint16_t mha_k_norm_weight[restrict fa_layer_count][head_dim],
+    uint16_t mha_v_weight[restrict fa_layer_count][kv_head_count][head_dim]
                          [embedding_dim],
-    uint16_t mha_out_weight[restrict layer_count][embedding_dim]
+    uint16_t mha_out_weight[restrict fa_layer_count][embedding_dim]
                            [q_head_count * head_dim],
+    uint16_t la_qkv_weight[restrict la_layer_count][la_qkv_dim][embedding_dim],
+    uint16_t la_gate_weight[restrict la_layer_count][la_v_head_count]
+                           [la_v_head_dim][embedding_dim],
+    uint16_t la_alpha_weight[restrict la_layer_count][la_v_head_count]
+                            [embedding_dim],
+    uint16_t la_beta_weight[restrict la_layer_count][la_v_head_count]
+                           [embedding_dim],
+    uint16_t la_dt_bias[restrict la_layer_count][la_v_head_count],
+    float la_decay_weight[restrict la_layer_count][la_v_head_count],
+    uint16_t la_conv_weight[restrict la_layer_count][la_qkv_dim]
+                           [la_kernel_size],
+    float la_norm_weight[restrict la_layer_count][la_v_head_dim],
+    uint16_t la_out_weight[restrict la_layer_count][embedding_dim]
+                          [la_v_head_count][la_v_head_dim],
     uint16_t ffn_norm_weight[restrict layer_count][embedding_dim],
     uint16_t ffn_fc_weight[restrict layer_count][hidden_dim][embedding_dim],
     uint16_t ffn_up_weight[restrict layer_count][hidden_dim][embedding_dim],
@@ -1243,6 +1752,31 @@ static void transformer_predict_chunk(
     float logits[restrict TRANSFORMER_CHUNK_MAX_LEN][vocabulary_len]
 ) {
   (void)q_head_count; // Unused except in debug mode
+  (void)layer_types;
+  (void)fa_layer_count;
+  (void)la_kernel_size;
+  (void)la_k_head_dim;
+  (void)la_k_head_count;
+  (void)la_v_head_dim;
+  (void)la_v_head_count;
+  (void)la_qkv_dim;
+  (void)mha_gate_weight;
+  (void)la_qkv_weight;
+  (void)la_gate_weight;
+  (void)la_alpha_weight;
+  (void)la_beta_weight;
+  (void)la_dt_bias;
+  (void)la_decay_weight;
+  (void)la_conv_weight;
+  (void)la_norm_weight;
+  (void)la_out_weight;
+
+  if (la_layer_count > 0) {
+    UTIL_DIE("linear attention inference is not implemented yet");
+  }
+  if (mha_output_gate) {
+    UTIL_DIE("gated full attention inference is not implemented yet");
+  }
 
   // Convert token ids to embedding vector representation
   #pragma omp single
@@ -1632,6 +2166,8 @@ void transformer_predict(
   size_t embedding_dim = c->embedding_dim;
   size_t head_dim = c->head_dim;
   size_t hidden_dim = c->hidden_dim;
+  size_t la_qkv_dim = 2 * (c->la_k_head_count * c->la_k_head_dim) +
+                      (c->la_v_head_count * c->la_v_head_dim);
 
   // Clamp logits_count to available positions
   if (logits_count > token_count) {
@@ -1672,12 +2208,22 @@ void transformer_predict(
         vocabulary_len,
         context_len,
         layer_count,
+        c->layer_types,
+        c->fa_layer_count,
+        c->la_layer_count,
         q_head_count,
         kv_head_count,
         q_head_per_kv_head_count,
         embedding_dim,
         head_dim,
         hidden_dim,
+        c->la_kernel_size,
+        c->la_k_head_dim,
+        c->la_k_head_count,
+        c->la_v_head_dim,
+        c->la_v_head_count,
+        la_qkv_dim,
+        c->mha_output_gate,
         c->rope_pair_bound,
         c->rope_pair_offset,
         c->rope_pair_stride,
@@ -1687,11 +2233,24 @@ void transformer_predict(
         (uint16_t (*)[embedding_dim])w->mha_norm_weight,
         (uint16_t (*)[kv_head_count][q_head_per_kv_head_count][head_dim]
                      [embedding_dim])w->mha_q_weight,
+        (uint16_t (*)[kv_head_count][q_head_per_kv_head_count][head_dim]
+                     [embedding_dim])w->mha_gate_weight,
         (uint16_t (*)[head_dim])w->mha_q_norm_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_k_weight,
         (uint16_t (*)[head_dim])w->mha_k_norm_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_v_weight,
         (uint16_t (*)[embedding_dim][q_head_count * head_dim])w->mha_out_weight,
+        (uint16_t (*)[la_qkv_dim][embedding_dim])w->la_qkv_weight,
+        (uint16_t (*)[c->la_v_head_count][c->la_v_head_dim][embedding_dim])
+            w->la_gate_weight,
+        (uint16_t (*)[c->la_v_head_count][embedding_dim])w->la_alpha_weight,
+        (uint16_t (*)[c->la_v_head_count][embedding_dim])w->la_beta_weight,
+        (uint16_t (*)[c->la_v_head_count])w->la_dt_bias,
+        (float (*)[c->la_v_head_count])w->la_decay_weight,
+        (uint16_t (*)[la_qkv_dim][c->la_kernel_size])w->la_conv_weight,
+        (float (*)[c->la_v_head_dim])w->la_norm_weight,
+        (uint16_t (*)[embedding_dim][c->la_v_head_count][c->la_v_head_dim])
+            w->la_out_weight,
         (uint16_t (*)[embedding_dim])w->ffn_norm_weight,
         (uint16_t (*)[hidden_dim][embedding_dim])w->ffn_fc_weight,
         (uint16_t (*)[hidden_dim][embedding_dim])w->ffn_up_weight,

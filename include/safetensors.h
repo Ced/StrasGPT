@@ -19,6 +19,15 @@ struct options;
 #define SAFETENSORS_PATTERN_MHA_K_NORM_WEIGHT "model.layers.%d.self_attn.k_norm.weight"
 #define SAFETENSORS_PATTERN_MHA_V_WEIGHT      "model.layers.%d.self_attn.v_proj.weight"
 #define SAFETENSORS_PATTERN_MHA_OUT_WEIGHT    "model.layers.%d.self_attn.o_proj.weight"
+#define SAFETENSORS_PATTERN_LA_QKV_WEIGHT     "model.layers.%d.linear_attn.in_proj_qkv.weight"
+#define SAFETENSORS_PATTERN_LA_GATE_WEIGHT    "model.layers.%d.linear_attn.in_proj_z.weight"
+#define SAFETENSORS_PATTERN_LA_ALPHA_WEIGHT   "model.layers.%d.linear_attn.in_proj_a.weight"
+#define SAFETENSORS_PATTERN_LA_BETA_WEIGHT    "model.layers.%d.linear_attn.in_proj_b.weight"
+#define SAFETENSORS_PATTERN_LA_DT_BIAS        "model.layers.%d.linear_attn.dt_bias"
+#define SAFETENSORS_PATTERN_LA_DECAY_WEIGHT   "model.layers.%d.linear_attn.A_log"
+#define SAFETENSORS_PATTERN_LA_CONV_WEIGHT    "model.layers.%d.linear_attn.conv1d.weight"
+#define SAFETENSORS_PATTERN_LA_NORM_WEIGHT    "model.layers.%d.linear_attn.norm.weight"
+#define SAFETENSORS_PATTERN_LA_OUT_WEIGHT     "model.layers.%d.linear_attn.out_proj.weight"
 #define SAFETENSORS_PATTERN_FFN_NORM_WEIGHT   "model.layers.%d.post_attention_layernorm.weight"
 #define SAFETENSORS_PATTERN_FFN_FC_WEIGHT     "model.layers.%d.mlp.gate_proj.weight"
 #define SAFETENSORS_PATTERN_FFN_UP_WEIGHT     "model.layers.%d.mlp.up_proj.weight"
@@ -28,9 +37,15 @@ struct options;
 
 #define SAFETENSORS_MAX_FILE_COUNT          64
 #define SAFETENSORS_MAX_DIM_COUNT           8
+#define SAFETENSORS_MAX_LAYER_COUNT         1024
 #define SAFETENSORS_MAX_MROPE_SECTION_COUNT 8
 #define SAFETENSORS_MAX_TENSOR_COUNT        65536
 #define SAFETENSORS_MAX_STRING              1024
+
+typedef enum {
+  SAFETENSORS_LAYER_TYPE_FA, // Full attention
+  SAFETENSORS_LAYER_TYPE_LA, // Linear attention
+} safetensors_layer_type_t;
 
 typedef enum {
   SAFETENSORS_TYPE_F16,  // IEEE float16 (half precision)
@@ -66,6 +81,13 @@ typedef struct safetensors{
   bool rope_interleaved; // true: pairs interleaved (Meta), false: grouped (HF)
   size_t mrope_section_count; // Sections for multi-scale RoPE (0 if none)
   size_t mrope_section[SAFETENSORS_MAX_MROPE_SECTION_COUNT];
+  safetensors_layer_type_t layer_types[SAFETENSORS_MAX_LAYER_COUNT];
+  size_t la_kernel_size;  // Linear attention convolution kernel size
+  size_t la_k_head_dim;   // Linear attention key head dimension
+  size_t la_k_head_count; // Linear attention key head count
+  size_t la_v_head_dim;   // Linear attention value head dimension
+  size_t la_v_head_count; // Linear attention value head count
+  bool mha_output_gate;   // Full attention has a learned output gate
 
   // Special tokens from the configuration file
   int bos_token_id;      // Beginning of string token id

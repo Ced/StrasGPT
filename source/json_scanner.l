@@ -36,9 +36,18 @@ embedding_dim     \"hidden_size\"
 head_dim          \"head_dim\"
 hidden_dim        \"intermediate_size\"
 layer_count       \"num_hidden_layers\"
+layer_types       \"layer_types\"
+full_attention    \"full_attention\"
+linear_attention  \"linear_attention\"
 model_type        \"model_type\"
 q_head_count      \"num_attention_heads\"
 kv_head_count     \"num_key_value_heads\"
+la_kernel_size    \"linear_conv_kernel_dim\"
+la_k_head_dim     \"linear_key_head_dim\"
+la_k_head_count   \"linear_num_key_heads\"
+la_v_head_dim     \"linear_value_head_dim\"
+la_v_head_count   \"linear_num_value_heads\"
+mha_output_gate   \"attn_output_gate\"
 vocabulary_len    \"vocab_size\"
 context_len       \"max_position_embeddings\"
 epsilon           \"rms_norm_eps\"
@@ -139,6 +148,21 @@ null              null
   return LAYER_COUNT;
 }
 
+<INITIAL>{layer_types} {
+  dump("layer_types", yytext);
+  return LAYER_TYPES;
+}
+
+<INITIAL>{full_attention} {
+  dump("full_attention", yytext);
+  return FULL_ATTENTION;
+}
+
+<INITIAL>{linear_attention} {
+  dump("linear_attention", yytext);
+  return LINEAR_ATTENTION;
+}
+
 <INITIAL>{model_type} {
   dump("model_type", yytext);
   return MODEL_TYPE;
@@ -152,6 +176,36 @@ null              null
 <INITIAL>{kv_head_count} {
   dump("kv_head_count", yytext);
   return KV_HEAD_COUNT;
+}
+
+<INITIAL>{la_kernel_size} {
+  dump("la_kernel_size", yytext);
+  return LA_KERNEL_SIZE;
+}
+
+<INITIAL>{la_k_head_dim} {
+  dump("la_k_head_dim", yytext);
+  return LA_K_HEAD_DIM;
+}
+
+<INITIAL>{la_k_head_count} {
+  dump("la_k_head_count", yytext);
+  return LA_K_HEAD_COUNT;
+}
+
+<INITIAL>{la_v_head_dim} {
+  dump("la_v_head_dim", yytext);
+  return LA_V_HEAD_DIM;
+}
+
+<INITIAL>{la_v_head_count} {
+  dump("la_v_head_count", yytext);
+  return LA_V_HEAD_COUNT;
+}
+
+<INITIAL>{mha_output_gate} {
+  dump("mha_output_gate", yytext);
+  return MHA_OUTPUT_GATE;
 }
 
 <INITIAL>{vocabulary_len} {

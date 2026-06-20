@@ -31,6 +31,7 @@
   size_t parser_tensor = 0;
   size_t parser_dim = 0;
   size_t parser_file = 0;
+  size_t parser_layer_type = 0;
   size_t parser_header_len = 0;
 %}
 
@@ -52,6 +53,10 @@
 %token EMBEDDING_DIM HEAD_DIM HIDDEN_DIM LAYER_COUNT MODEL_TYPE Q_HEAD_COUNT
 %token KV_HEAD_COUNT VOCABULARY_LEN CONTEXT_LEN MODEL VOCAB
 %token EPSILON ROPE_THETA ROPE_SCALING MROPE_INTERLEAVED MROPE_SECTION
+%token LAYER_TYPES LA_KERNEL_SIZE LA_K_HEAD_DIM LA_K_HEAD_COUNT
+%token LA_V_HEAD_DIM LA_V_HEAD_COUNT
+%token MHA_OUTPUT_GATE
+%token FULL_ATTENTION LINEAR_ATTENTION
 %token MODE_CONFIG MODE_INDEX MODE_SAFETENSORS MODE_TOKENIZER
 %start entry
 
@@ -125,8 +130,14 @@ config_member
         yyerror("non integer layer_count value");
         YYABORT;
       }
+      if ($3.ival < 0 || $3.ival > SAFETENSORS_MAX_LAYER_COUNT) {
+        yyerror("layer_count exceeds supported maximum");
+        YYABORT;
+      }
       parser_safetensors->layer_count = $3.ival;
     }
+  | LAYER_TYPES ':' '[' layer_type_list ']'
+  | LAYER_TYPES ':' '[' ']'
   | MODEL_TYPE ':' STRING
     {
       parser_safetensors->model_type = strdup($3);
@@ -147,6 +158,50 @@ config_member
         YYABORT;
       }
       parser_safetensors->kv_head_count = $3.ival;
+    }
+  | LA_KERNEL_SIZE ':' NUMBER
+    {
+      if (!$3.is_int || $3.ival < 0) {
+        yyerror("invalid linear_conv_kernel_dim value");
+        YYABORT;
+      }
+      parser_safetensors->la_kernel_size = $3.ival;
+    }
+  | LA_K_HEAD_DIM ':' NUMBER
+    {
+      if (!$3.is_int || $3.ival < 0) {
+        yyerror("invalid linear_key_head_dim value");
+        YYABORT;
+      }
+      parser_safetensors->la_k_head_dim = $3.ival;
+    }
+  | LA_K_HEAD_COUNT ':' NUMBER
+    {
+      if (!$3.is_int || $3.ival < 0) {
+        yyerror("invalid linear_num_key_heads value");
+        YYABORT;
+      }
+      parser_safetensors->la_k_head_count = $3.ival;
+    }
+  | LA_V_HEAD_DIM ':' NUMBER
+    {
+      if (!$3.is_int || $3.ival < 0) {
+        yyerror("invalid linear_value_head_dim value");
+        YYABORT;
+      }
+      parser_safetensors->la_v_head_dim = $3.ival;
+    }
+  | LA_V_HEAD_COUNT ':' NUMBER
+    {
+      if (!$3.is_int || $3.ival < 0) {
+        yyerror("invalid linear_num_value_heads value");
+        YYABORT;
+      }
+      parser_safetensors->la_v_head_count = $3.ival;
+    }
+  | MHA_OUTPUT_GATE ':' BOOLEAN
+    {
+      parser_safetensors->mha_output_gate = $3;
     }
   | VOCABULARY_LEN ':' NUMBER
     {
@@ -190,6 +245,34 @@ config_member
     {
       free($1);
       json_scanner_leave_kw_as_string_mode();
+    }
+  ;
+
+layer_type_list
+  : layer_type_list ',' layer_type
+  | layer_type
+  ;
+
+layer_type
+  : FULL_ATTENTION
+    {
+      if (parser_layer_type >= SAFETENSORS_MAX_LAYER_COUNT) {
+        yyerror("too many layer types");
+        YYABORT;
+      }
+      parser_safetensors->layer_types[parser_layer_type] =
+          SAFETENSORS_LAYER_TYPE_FA;
+      parser_layer_type++;
+    }
+  | LINEAR_ATTENTION
+    {
+      if (parser_layer_type >= SAFETENSORS_MAX_LAYER_COUNT) {
+        yyerror("too many layer types");
+        YYABORT;
+      }
+      parser_safetensors->layer_types[parser_layer_type] =
+          SAFETENSORS_LAYER_TYPE_LA;
+      parser_layer_type++;
     }
   ;
 
@@ -526,6 +609,7 @@ int yylex(void) {
 safetensors_t* parser_parse_safetensors(const char* path) {
   char fullpath[SAFETENSORS_MAX_STRING];
   parser_safetensors = safetensors_malloc();
+  parser_layer_type = 0;
 
   // Let's parse the config file first
   #ifdef DEBUG
