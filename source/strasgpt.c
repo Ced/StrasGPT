@@ -13,18 +13,18 @@
 #include <sys/resource.h>
 
 #ifdef PARALLEL
-#include <omp.h>
 #include <mpi.h>
+#include <omp.h>
 #else
-#define MPI_SUCCESS            0
-#define MPI_COMM_WORLD         0
-#define omp_get_thread_num()   0
-#define omp_get_num_threads()  1
+#define MPI_SUCCESS           0
+#define MPI_COMM_WORLD        0
+#define omp_get_thread_num()  0
+#define omp_get_num_threads() 1
 #define omp_set_num_threads(a)
-#define MPI_Init(a, b)         MPI_SUCCESS
-#define MPI_Comm_rank(a, b)    (*(b) = 0, MPI_SUCCESS)
-#define MPI_Comm_size(a, b)    (*(b) = 1, MPI_SUCCESS)
-#define MPI_Finalize()         MPI_SUCCESS
+#define MPI_Init(a, b)      MPI_SUCCESS
+#define MPI_Comm_rank(a, b) (*(b) = 0, MPI_SUCCESS)
+#define MPI_Comm_size(a, b) (*(b) = 1, MPI_SUCCESS)
+#define MPI_Finalize()      MPI_SUCCESS
 #endif
 
 extern int json_scanner_lex_destroy(void);
@@ -79,7 +79,7 @@ int main(int argc, char* argv[]) {
   setenv("OMP_WAIT_POLICY", "ACTIVE", 1);
   omp_set_num_threads(options->thread_count);
 
-  #pragma omp parallel
+#pragma omp parallel
   fprintf(
       stderr,
       "StrasGPT OpenMP thread %2d (total %2d) of MPI rank %2d (total %2d)\n",
@@ -125,9 +125,9 @@ int main(int argc, char* argv[]) {
   sampler_t* sampler = sampler_build(options, transformer);
   sampler_print(stderr, sampler);
   fprintf(stderr, "\n");
-  #ifdef DEBUG
+#ifdef DEBUG
   sampler->tokenizer = tokenizer; // For debug prints
-  #endif
+#endif
 
   // Get the prompt, either from file or command line argument
   char* prompt = NULL;
@@ -199,20 +199,20 @@ int main(int argc, char* argv[]) {
 
   // Prepare to get prediction results
   size_t generated_count = 0; // Number of tokens generated so far
-  size_t vocabulary_len = 0; // Will be filled by transformer_logits_malloc
+  size_t vocabulary_len = 0;  // Will be filled by transformer_logits_malloc
   float* logits = transformer_logits_malloc(transformer, 1, &vocabulary_len);
   int predicted_token = 0;
   char* predicted_string = NULL;
   start = time_in_ms();
   bool continue_generation = true;
 
-  #pragma omp parallel shared(continue_generation)
+#pragma omp parallel shared(continue_generation)
   {
     // First achieve prompt processing (prefill):
     // - Get the logits (probability distribution) for the next token
     transformer_predict(transformer, token_count, token, 1, logits);
 
-    #pragma omp single
+#pragma omp single
     {
       end = time_in_ms();
       prefill_time = (end - start) / 1000.0;
@@ -231,7 +231,7 @@ int main(int argc, char* argv[]) {
     while (generated_count < options->step_count && continue_generation) {
       transformer_predict(transformer, 1, &predicted_token, 1, logits);
 
-      #pragma omp single
+#pragma omp single
       {
         end = time_in_ms();
         decode_time += (end - start) / 1000.0;
@@ -240,7 +240,8 @@ int main(int argc, char* argv[]) {
         generated_count++;
         if (predicted_token != tokenizer->eos_token_id) {
           predicted_string = tokenizer_decode(tokenizer, predicted_token);
-          tokenizer_print_token_string(stdout, predicted_string);
+          // tokenizer_print_token_string(stdout, predicted_string);
+          fprintf(stdout, "%d ", predicted_token);
         } else {
           // End of string token, stop generating (set loop exit condition)
           fprintf(stdout, "%s", TOKENIZER_STRING_TOKEN_EOS);

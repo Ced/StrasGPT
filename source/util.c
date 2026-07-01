@@ -1,8 +1,8 @@
 #include "util.h"
 #include <stdbool.h>
-#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,11 +23,11 @@
 
 // Helper to print a single row
 static void row_generic_print(
-  size_t row_index,
-  size_t col_count,
-  size_t col_sample_count,
-  void* m,
-  util_matrix_type_t type
+    size_t row_index,
+    size_t col_count,
+    size_t col_sample_count,
+    void* m,
+    util_matrix_type_t type
 ) {
   printf("[");
   int overlap = (col_sample_count * 2 >= col_count);
@@ -156,48 +156,48 @@ void util_matrix_summary_bf16(
 }
 
 #define DEFINE_UTIL_MATRIX_SUMMARY(TYPE, NAME) \
-    void NAME( \
+  void NAME( \
       const char* name, \
       size_t row_count, \
       size_t col_count, \
       size_t sample_count, \
       const TYPE* m \
-    ) { \
-      size_t total = row_count * col_count; \
-      if (total == 0) { \
-        fprintf(stderr, "%9s: empty matrix\n", name ? name : "matrix"); \
-        return; \
+  ) { \
+    size_t total = row_count * col_count; \
+    if (total == 0) { \
+      fprintf(stderr, "%9s: empty matrix\n", name ? name : "matrix"); \
+      return; \
+    } \
+    double min = (double)m[0]; \
+    double max = (double)m[0]; \
+    double sum = 0.0f; \
+    fprintf(stderr, "%6s: [", name ? name : "matrix"); \
+    size_t i; \
+    for (i = 0; i < sample_count && i < total; i++) { \
+      fprintf(stderr, " %6.3f", (double)m[i]); \
+    } \
+    if (2 * sample_count < total) { \
+      fprintf(stderr, " ..."); \
+    } \
+    size_t tail_start = (2 * sample_count < total) ? total - sample_count : i; \
+    for (i = tail_start; i < total; i++) { \
+      fprintf(stderr, " %6.3f", (double)m[i]); \
+    } \
+    fprintf(stderr, " ] "); \
+    for (i = 0; i < total; i++) { \
+      double val = (double)m[i]; \
+      if (val < min) { \
+        min = val; \
       } \
-      double min = (double)m[0]; \
-      double max = (double)m[0]; \
-      double sum = 0.0f; \
-      fprintf(stderr, "%6s: [", name ? name : "matrix"); \
-      size_t i; \
-      for (i = 0; i < sample_count && i < total; i++) { \
-        fprintf(stderr, " %6.3f", (double)m[i]); \
+      if (val > max) { \
+        max = val; \
       } \
-      if (2 * sample_count < total) { \
-        fprintf(stderr, " ..."); \
-      } \
-      size_t tail_start = (2 * sample_count < total) ? total - sample_count : i; \
-      for (i = tail_start; i < total; i++) { \
-        fprintf(stderr, " %6.3f", (double)m[i]); \
-      } \
-      fprintf(stderr, " ] "); \
-      for (i = 0; i < total; i++) { \
-        double val = (double)m[i]; \
-        if (val < min) { \
-          min = val; \
-        } \
-        if (val > max) { \
-          max = val; \
-        } \
-        sum += val; \
-      } \
-      double mean = sum / (double)total; \
-      fprintf(stderr, "min=%6.3f max=%6.3f ", min, max); \
-      fprintf(stderr, "mean=%6.3f sum=%6.3f\n", mean, sum); \
-    }
+      sum += val; \
+    } \
+    double mean = sum / (double)total; \
+    fprintf(stderr, "min=%6.3f max=%6.3f ", min, max); \
+    fprintf(stderr, "mean=%6.3f sum=%6.3f\n", mean, sum); \
+  }
 
 DEFINE_UTIL_MATRIX_SUMMARY(float, util_matrix_summary_fp32)
 DEFINE_UTIL_MATRIX_SUMMARY(int8_t, util_matrix_summary_int8)
@@ -206,8 +206,9 @@ DEFINE_UTIL_MATRIX_SUMMARY(int8_t, util_matrix_summary_int8)
 
 // util_parse_tokens:
 // ------------------
-// Parse a space-separated or comma-separated string of token IDs into an integer array.
-// The input string should contain whitespace and/or comma-separated integer token IDs.
+// Parse a space-separated or comma-separated string of token IDs into an
+// integer array. The input string should contain whitespace and/or
+// comma-separated integer token IDs.
 //
 // Parameters:
 // - input:        Input string containing space/comma-separated token IDs
@@ -407,9 +408,7 @@ void util_meta_to_hf(
 // ----------------------------------------------------------------------------
 
 // Wrap prompt with instruction tokens based on model type
-char* format_instruction_prompt(
-    char* prompt, char* model_type
-) {
+char* format_instruction_prompt(char* prompt, char* model_type) {
   if (!model_type) {
     return strdup(prompt);
   }
@@ -418,7 +417,17 @@ char* format_instruction_prompt(
   size_t len = strlen(prompt);
 
   // Detect model type and apply appropriate template
-  if (strstr(model_type, "Qwen") || strstr(model_type, "qwen")) {
+  if (strstr(model_type, "qwen3_5")) {
+    const char* template =
+        "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n"
+        "<|im_start|>user\n%s<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n";
+    formatted = malloc(strlen(template) + len + 1);
+    if (formatted) {
+      sprintf(formatted, template, prompt);
+    }
+  } else if (strstr(model_type, "Qwen") || strstr(model_type, "qwen")) {
     // Qwen
     const char* template =
         "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n"
@@ -512,23 +521,56 @@ static void prepend_append_tokens(
 // - The token array is reallocated; caller maintains ownership
 
 void format_instruction_tokens_pre_tokenized(
-    size_t* token_count,
-    int** token,
-    char* model_type
+    size_t* token_count, int** token, char* model_type
 ) {
   if (!model_type) {
     return;
   }
-
   // Qwen
+  if (strstr(model_type, "qwen3_5")) {
+    int prefix[] = {
+        248045,
+        8678,
+        198,
+        2523,
+        513,
+        264,
+        10631,
+        17313,
+        13,
+        198,
+        248046,
+        198,
+        248045,
+        846,
+        198
+    };
+    int suffix[] = {248046, 198, 248045, 74455, 198, 248068, 198};
+    size_t prefix_len = sizeof(prefix) / sizeof(prefix[0]);
+    size_t suffix_len = sizeof(suffix) / sizeof(suffix[0]);
+    prepend_append_tokens(
+        token_count, token, prefix_len, prefix, suffix_len, suffix
+    );
+    return;
+  }
   if (strstr(model_type, "qwen3") || strstr(model_type, "qwen3_vl")) {
     int prefix[] = {
-      151644, 8948, 198, 2610, 525, 264, 10950, 17847,
-      624, 151645, 198, 151644, 872, 198
+        151644,
+        8948,
+        198,
+        2610,
+        525,
+        264,
+        10950,
+        17847,
+        624,
+        151645,
+        198,
+        151644,
+        872,
+        198
     };
-    int suffix[] = {
-      198, 151645, 198, 151644, 77091
-    };
+    int suffix[] = {198, 151645, 198, 151644, 77091};
 
     size_t prefix_len = sizeof(prefix) / sizeof(prefix[0]);
     size_t suffix_len = sizeof(suffix) / sizeof(suffix[0]);
@@ -540,8 +582,8 @@ void format_instruction_tokens_pre_tokenized(
 
   // Mistral
   if (strstr(model_type, "Mistral") || strstr(model_type, "mistral")) {
-    int prefix[] = { 1, 1, 3 };
-    int suffix[] = { 4 };
+    int prefix[] = {1, 1, 3};
+    int suffix[] = {4};
 
     size_t prefix_len = sizeof(prefix) / sizeof(prefix[0]);
     size_t suffix_len = sizeof(suffix) / sizeof(suffix[0]);
@@ -554,13 +596,27 @@ void format_instruction_tokens_pre_tokenized(
   // Llama
   if (strstr(model_type, "Llama") || strstr(model_type, "llama")) {
     int prefix[] = {
-      128000, 128000, 198, 128006, 9125, 128007, 198,
-      2675, 527, 264, 11190, 18328, 627, 128009, 198,
-      128006, 882, 128007, 198
+        128000,
+        128000,
+        198,
+        128006,
+        9125,
+        128007,
+        198,
+        2675,
+        527,
+        264,
+        11190,
+        18328,
+        627,
+        128009,
+        198,
+        128006,
+        882,
+        128007,
+        198
     };
-    int suffix[] = {
-      198, 128009, 198, 128006, 78191, 128007
-    };
+    int suffix[] = {198, 128009, 198, 128006, 78191, 128007};
 
     size_t prefix_len = sizeof(prefix) / sizeof(prefix[0]);
     size_t suffix_len = sizeof(suffix) / sizeof(suffix[0]);

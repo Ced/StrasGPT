@@ -52,7 +52,7 @@
 %token BOS_TOKEN_ID EOS_TOKEN_ID
 %token EMBEDDING_DIM HEAD_DIM HIDDEN_DIM LAYER_COUNT MODEL_TYPE Q_HEAD_COUNT
 %token KV_HEAD_COUNT VOCABULARY_LEN CONTEXT_LEN MODEL VOCAB
-%token EPSILON ROPE_THETA ROPE_SCALING MROPE_INTERLEAVED MROPE_SECTION
+%token EPSILON ROPE_THETA ROPE_SCALING MROPE_INTERLEAVED MROPE_SECTION PARTIAL_ROTARY_FACTOR
 %token LAYER_TYPES LA_KERNEL_SIZE LA_K_HEAD_DIM LA_K_HEAD_COUNT
 %token LA_V_HEAD_DIM LA_V_HEAD_COUNT
 %token MHA_OUTPUT_GATE
@@ -287,10 +287,19 @@ rope_scaling_member
     {
       parser_safetensors->rope_interleaved = $3;
     }
+  | ROPE_THETA ':' NUMBER
+    {
+      parser_safetensors->rope_theta = $3.fval;
+    }
+  | PARTIAL_ROTARY_FACTOR ':' NUMBER
+    {
+      parser_safetensors->partial_rotary_factor = $3.fval;
+    }
   | STRING ':' json_value
     {
       free($1);
     }
+  ;
 
 mrope_section_list
   : mrope_section_list ',' NUMBER

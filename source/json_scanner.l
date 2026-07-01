@@ -24,39 +24,40 @@
 integer           [+-]?[0-9]+
 float             [+-]?(([0-9]*\.[0-9]+)|([0-9]+\.)|[0-9]+)([eE][+-]?[0-9]+)?
 
-metadata          \"__metadata__\"|\"metadata\"
-text_config       \"text_config\"
-type              \"dtype\"
-shape             \"shape\"
-offset            \"data_offsets\"
-weight_map        \"weight_map\"
-bos_token_id      \"bos_token_id\"
-eos_token_id      \"eos_token_id\"
-embedding_dim     \"hidden_size\"
-head_dim          \"head_dim\"
-hidden_dim        \"intermediate_size\"
-layer_count       \"num_hidden_layers\"
-layer_types       \"layer_types\"
-full_attention    \"full_attention\"
-linear_attention  \"linear_attention\"
-model_type        \"model_type\"
-q_head_count      \"num_attention_heads\"
-kv_head_count     \"num_key_value_heads\"
-la_kernel_size    \"linear_conv_kernel_dim\"
-la_k_head_dim     \"linear_key_head_dim\"
-la_k_head_count   \"linear_num_key_heads\"
-la_v_head_dim     \"linear_value_head_dim\"
-la_v_head_count   \"linear_num_value_heads\"
-mha_output_gate   \"attn_output_gate\"
-vocabulary_len    \"vocab_size\"
-context_len       \"max_position_embeddings\"
-epsilon           \"rms_norm_eps\"
-rope_theta        \"rope_theta\"
-rope_scaling      \"rope_scaling\"
-mrope_interleaved \"mrope_interleaved\"
-mrope_section     \"mrope_section\"
-model             \"model\"
-vocab             \"vocab\"
+metadata              \"__metadata__\"|\"metadata\"
+text_config           \"text_config\"
+type                  \"dtype\"
+shape                 \"shape\"
+offset                \"data_offsets\"
+weight_map            \"weight_map\"
+bos_token_id          \"bos_token_id\"
+eos_token_id          \"eos_token_id\"
+embedding_dim         \"hidden_size\"
+head_dim              \"head_dim\"
+hidden_dim            \"intermediate_size\"
+layer_count           \"num_hidden_layers\"
+layer_types           \"layer_types\"
+full_attention        \"full_attention\"
+linear_attention      \"linear_attention\"
+model_type            \"model_type\"
+q_head_count          \"num_attention_heads\"
+kv_head_count         \"num_key_value_heads\"
+la_kernel_size        \"linear_conv_kernel_dim\"
+la_k_head_dim         \"linear_key_head_dim\"
+la_k_head_count       \"linear_num_key_heads\"
+la_v_head_dim         \"linear_value_head_dim\"
+la_v_head_count       \"linear_num_value_heads\"
+mha_output_gate       \"attn_output_gate\"
+vocabulary_len        \"vocab_size\"
+context_len           \"max_position_embeddings\"
+epsilon               \"rms_norm_eps\"
+rope_theta            \"rope_theta\"
+rope_scaling          \"rope_scaling\"|\"rope_parameters\"
+mrope_interleaved     \"mrope_interleaved\"
+mrope_section         \"mrope_section\"
+partial_rotary_factor \"partial_rotary_factor\"
+model                 \"model\"
+vocab                 \"vocab\"
 
 string            \"(\\.|[^\"\\])*\"
 boolean           true|false
@@ -241,6 +242,11 @@ null              null
 <INITIAL>{mrope_section} {
   dump("mrope_section", yytext);
   return MROPE_SECTION;
+}
+
+<INITIAL>{partial_rotary_factor} {
+  dump("partial_rotary_factor", yytext);
+  return PARTIAL_ROTARY_FACTOR;
 }
 
 <INITIAL>{model} {

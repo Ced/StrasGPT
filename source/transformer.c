@@ -1,5 +1,5 @@
-#include "safetensors.h"
 #include "transformer.h"
+#include "safetensors.h"
 #include "util.h"
 #include <ctype.h>
 #include <math.h>
@@ -8,10 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sys/mman.h>   // for mmap(), munmap(), PROT_*, MAP_* constants
-#include <sys/types.h>  // for size_t, off_t
-#include <fcntl.h>      // for open() and O_* flags
-#include <unistd.h>     // for close()
+#include <fcntl.h>     // for open() and O_* flags
+#include <sys/mman.h>  // for mmap(), munmap(), PROT_*, MAP_* constants
+#include <sys/types.h> // for size_t, off_t
+#include <unistd.h>    // for close()
 
 // Create a transformer_configuration_t structure from a safetensors_t
 static transformer_configuration_t* configuration_from_safetensors(
@@ -40,6 +40,20 @@ static transformer_configuration_t* configuration_from_safetensors(
     config->rope_pair_offset = safetensors->head_dim / 2;
     config->rope_pair_stride = 1;
   }
+  size_t sect_sum = 0;
+  for (size_t i = 0; i < safetensors->mrope_section_count; i++) {
+    sect_sum += safetensors->mrope_section[i];
+  }
+  if (safetensors->partial_rotary_factor > 0.0f) {
+    // e.g. 0.25 * 256 = 64
+    config->n_rot =
+        (size_t)(safetensors->partial_rotary_factor * safetensors->head_dim +
+                 0.5f);
+  } else if (sect_sum > 0) {
+    config->n_rot = 2 * sect_sum;          // fallback: derive from sections
+  } else {
+    config->n_rot = safetensors->head_dim; // fallback: rotate everything
+  }
   config->mrope_section_count = safetensors->mrope_section_count;
   if (config->mrope_section_count > 0) {
     size_t size = config->mrope_section_count * sizeof(*config->mrope_section);
@@ -53,8 +67,7 @@ static transformer_configuration_t* configuration_from_safetensors(
   } else {
     config->mrope_section = NULL;
   }
-  size_t layer_types_size =
-      config->layer_count * sizeof(*config->layer_types);
+  size_t layer_types_size = config->layer_count * sizeof(*config->layer_types);
   config->layer_types = malloc(layer_types_size);
   if (config->layer_types == NULL) {
     UTIL_DIE("failed to malloc for layer_types");
@@ -85,6 +98,15 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
     UTIL_DIE("failed to malloc for transformer_state_t");
   }
 
+  // Linear-attention layer count (t only has layer_types[])
+  // !!!!! very stupid but fine for the moment !!!!!
+  size_t la_layer_count = 0;
+  for (size_t i = 0; i < t->layer_count; i++) {
+    if (t->layer_types[i] == SAFETENSORS_LAYER_TYPE_LA) {
+      la_layer_count++;
+    }
+  }
+
   size_t chunk_max_len = TRANSFORMER_CHUNK_MAX_LEN;
   size_t kv_dim = t->head_dim * t->kv_head_count;
   size_t embedding_len = chunk_max_len * t->embedding_dim;
@@ -95,6 +117,14 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   size_t cache_len = t->context_len * t->layer_count * kv_dim;
   size_t logits_len = chunk_max_len * t->vocabulary_len;
   size_t rope_len = t->context_len * t->head_dim;
+  // for linear attention
+  size_t la_qkv_dim = 2 * t->la_k_head_count * t->la_k_head_dim +
+                      t->la_v_head_count * t->la_v_head_dim;
+  size_t la_v_dim = t->la_v_head_count * t->la_v_head_dim;
+  size_t la_conv_state_len =
+      la_layer_count * la_qkv_dim * (t->la_kernel_size - 1);
+  size_t la_ssm_state_len =
+      la_layer_count * t->la_v_head_count * t->la_v_head_dim * t->la_k_head_dim;
 
   size_t embedding_size = embedding_len * sizeof(*s->embedding);
   size_t mha_norm_size = embedding_len * sizeof(*s->mha_norm);
@@ -110,6 +140,14 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   size_t k_cache_size = cache_len * sizeof(*s->k_cache);
   size_t v_cache_size = cache_len * sizeof(*s->v_cache);
   size_t rope_cos_sin_size = rope_len * sizeof(*s->rope_cos_sin);
+  // for linear attention
+
+  size_t la_conv_state_size = la_conv_state_len * sizeof(*s->la_conv_state);
+  size_t la_ssm_state_size = la_ssm_state_len * sizeof(*s->la_ssm_state);
+  size_t la_qkv_mixed_size = la_qkv_dim * sizeof(*s->la_qkv_mixed);
+  size_t la_conv_out_size = la_qkv_dim * sizeof(*s->la_conv_out);
+  size_t la_z_size = la_v_dim * sizeof(*s->la_z);
+  size_t la_out_flat_size = la_v_dim * sizeof(*s->la_out_flat);
 
   s->embedding = aligned_alloc(UTIL_ALIGNMENT, embedding_size);
   s->mha_norm = aligned_alloc(UTIL_ALIGNMENT, mha_norm_size);
@@ -126,23 +164,36 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   s->v_cache = aligned_alloc(UTIL_ALIGNMENT, v_cache_size);
   s->rope_cos_sin = aligned_alloc(UTIL_ALIGNMENT, rope_cos_sin_size);
 
+  // for linear attention
+  if (la_conv_state_size > 0)
+    s->la_conv_state = aligned_alloc(UTIL_ALIGNMENT, la_conv_state_size);
+  if (la_ssm_state_size > 0)
+    s->la_ssm_state = aligned_alloc(UTIL_ALIGNMENT, la_ssm_state_size);
+  if (la_qkv_mixed_size > 0)
+    s->la_qkv_mixed = aligned_alloc(UTIL_ALIGNMENT, la_qkv_mixed_size);
+  if (la_conv_out_size > 0)
+    s->la_conv_out = aligned_alloc(UTIL_ALIGNMENT, la_conv_out_size);
+  if (la_z_size > 0)
+    s->la_z = aligned_alloc(UTIL_ALIGNMENT, la_z_size);
+  if (la_out_flat_size > 0)
+    s->la_out_flat = aligned_alloc(UTIL_ALIGNMENT, la_out_flat_size);
   // Ensure all mallocs went fine
-  if (!s->embedding ||
-      !s->mha_norm ||
-      !s->mha_q ||
-      !s->mha_score ||
-      !s->mha_att ||
-      !s->mha_out ||
-      !s->ffn_norm ||
-      !s->ffn_fc ||
-      !s->ffn_up ||
-      !s->ffn_out ||
-      !s->logits ||
-      !s->k_cache ||
-      !s->v_cache ||
-      !s->rope_cos_sin) {
+  if (!s->embedding || !s->mha_norm || !s->mha_q || !s->mha_score ||
+      !s->mha_att || !s->mha_out || !s->ffn_norm || !s->ffn_fc || !s->ffn_up ||
+      !s->ffn_out || !s->logits || !s->k_cache || !s->v_cache ||
+      !s->rope_cos_sin || (la_conv_state_size > 0 && !s->la_conv_state) ||
+      (la_ssm_state_size > 0 && !s->la_ssm_state) ||
+      (la_qkv_mixed_size > 0 && !s->la_qkv_mixed) ||
+      (la_conv_out_size > 0 && !s->la_conv_out) ||
+      (la_z_size > 0 && !s->la_z) ||
+      (la_out_flat_size > 0 && !s->la_out_flat)) {
     UTIL_DIE("failed to malloc for activations");
   }
+  // parameters for linear attention
+  if (la_conv_state_size > 0)
+    memset(s->la_conv_state, 0, la_conv_state_size);
+  if (la_ssm_state_size > 0)
+    memset(s->la_ssm_state, 0, la_ssm_state_size);
 
   // Initialize RoPE cosine and sine values
   // Half-split RoPE layout configuration
@@ -603,10 +654,7 @@ static void load_la_decay_weight(
   }
   float* decay = &weights->la_decay_weight[index * len];
   load_data(
-      safetensors->file[tensor->file],
-      tensor->offset,
-      tensor->size,
-      decay
+      safetensors->file[tensor->file], tensor->offset, tensor->size, decay
   );
   for (size_t i = 0; i < len; i++) {
     decay[i] = -expf(decay[i]);
@@ -891,9 +939,8 @@ static bool tensor_load(
       {SAFETENSORS_PATTERN_EMBEDDING_WEIGHT, load_embedding_weight},
       {SAFETENSORS_PATTERN_MHA_NORM_WEIGHT, load_mha_norm_weight},
       {SAFETENSORS_PATTERN_MHA_Q_WEIGHT,
-       safetensors->mha_output_gate
-           ? load_mha_q_gate_weight
-           : load_mha_q_weight},
+       safetensors->mha_output_gate ? load_mha_q_gate_weight
+                                    : load_mha_q_weight},
       {SAFETENSORS_PATTERN_MHA_Q_NORM_WEIGHT, load_mha_q_norm_weight},
       {SAFETENSORS_PATTERN_MHA_K_WEIGHT, load_mha_k_weight},
       {SAFETENSORS_PATTERN_MHA_K_NORM_WEIGHT, load_mha_k_norm_weight},
@@ -976,21 +1023,15 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   size_t mha_kv_len = fa_layer_count * t->kv_head_count * qkv_weight_dim;
   size_t mha_out_dim = t->q_head_count * t->head_dim;
   size_t mha_out_len = fa_layer_count * t->embedding_dim * mha_out_dim;
-  size_t la_qkv_len =
-      la_layer_count * linear_qkv_dim * t->embedding_dim;
-  size_t la_gate_len =
-      la_layer_count * linear_v_dim * t->embedding_dim;
-  size_t la_alpha_len =
-      la_layer_count * t->la_v_head_count * t->embedding_dim;
-  size_t la_beta_len =
-      la_layer_count * t->la_v_head_count * t->embedding_dim;
+  size_t la_qkv_len = la_layer_count * linear_qkv_dim * t->embedding_dim;
+  size_t la_gate_len = la_layer_count * linear_v_dim * t->embedding_dim;
+  size_t la_alpha_len = la_layer_count * t->la_v_head_count * t->embedding_dim;
+  size_t la_beta_len = la_layer_count * t->la_v_head_count * t->embedding_dim;
   size_t la_dt_len = la_layer_count * t->la_v_head_count;
   size_t la_decay_len = la_layer_count * t->la_v_head_count;
-  size_t la_conv_len =
-      la_layer_count * linear_qkv_dim * t->la_kernel_size;
+  size_t la_conv_len = la_layer_count * linear_qkv_dim * t->la_kernel_size;
   size_t la_norm_len = la_layer_count * t->la_v_head_dim;
-  size_t la_out_len =
-      la_layer_count * t->embedding_dim * linear_v_dim;
+  size_t la_out_len = la_layer_count * t->embedding_dim * linear_v_dim;
   size_t ffn_norm_len = t->layer_count * t->embedding_dim;
   size_t ffn_fc_len = t->layer_count * t->embedding_dim * t->hidden_dim;
   size_t ffn_up_len = t->layer_count * t->embedding_dim * t->hidden_dim;
@@ -1060,8 +1101,7 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   }
 
   // Ensure all mallocs went fine
-  if (!w->embedding_weight ||
-      !w->mha_norm_weight ||
+  if (!w->embedding_weight || !w->mha_norm_weight ||
       (fa_layer_count > 0 && !w->mha_q_weight) ||
       (mha_output_gate && !w->mha_gate_weight) ||
       (fa_layer_count > 0 && !w->mha_k_weight) ||
@@ -1075,13 +1115,9 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
       (la_layer_count > 0 && !w->la_decay_weight) ||
       (la_layer_count > 0 && !w->la_conv_weight) ||
       (la_layer_count > 0 && !w->la_norm_weight) ||
-      (la_layer_count > 0 && !w->la_out_weight) ||
-      !w->ffn_norm_weight ||
-      !w->ffn_fc_weight ||
-      !w->ffn_up_weight ||
-      !w->ffn_out_weight ||
-      !w->out_norm_weight ||
-      (!w->out_weight && !is_out_weigth_aliased) ||
+      (la_layer_count > 0 && !w->la_out_weight) || !w->ffn_norm_weight ||
+      !w->ffn_fc_weight || !w->ffn_up_weight || !w->ffn_out_weight ||
+      !w->out_norm_weight || (!w->out_weight && !is_out_weigth_aliased) ||
       (qk_normalization && !w->mha_q_norm_weight) ||
       (qk_normalization && !w->mha_k_norm_weight)) {
     UTIL_DIE("failed to malloc for weights");
@@ -1163,6 +1199,12 @@ void transformer_free(transformer_t* transformer) {
   free(s->k_cache);
   free(s->v_cache);
   free(s->rope_cos_sin);
+  free(s->la_conv_state);
+  free(s->la_ssm_state);
+  free(s->la_qkv_mixed);
+  free(s->la_conv_out);
+  free(s->la_z);
+  free(s->la_out_flat);
   free(s);
 
   free(c->mrope_section);
@@ -1202,25 +1244,18 @@ double transformer_layer_size_gb(
       fa_layer_count * c->kv_head_count * c->head_dim * c->embedding_dim;
   size_t mha_out_len =
       fa_layer_count * c->q_head_count * c->head_dim * c->embedding_dim;
-  size_t linear_qkv_dim =
-      2 * c->la_k_head_count * c->la_k_head_dim +
-      c->la_v_head_count * c->la_v_head_dim;
+  size_t linear_qkv_dim = 2 * c->la_k_head_count * c->la_k_head_dim +
+                          c->la_v_head_count * c->la_v_head_dim;
   size_t linear_v_dim = c->la_v_head_count * c->la_v_head_dim;
-  size_t la_qkv_len =
-      la_layer_count * linear_qkv_dim * c->embedding_dim;
-  size_t la_gate_len =
-      la_layer_count * linear_v_dim * c->embedding_dim;
-  size_t la_alpha_len =
-      la_layer_count * c->la_v_head_count * c->embedding_dim;
-  size_t la_beta_len =
-      la_layer_count * c->la_v_head_count * c->embedding_dim;
+  size_t la_qkv_len = la_layer_count * linear_qkv_dim * c->embedding_dim;
+  size_t la_gate_len = la_layer_count * linear_v_dim * c->embedding_dim;
+  size_t la_alpha_len = la_layer_count * c->la_v_head_count * c->embedding_dim;
+  size_t la_beta_len = la_layer_count * c->la_v_head_count * c->embedding_dim;
   size_t la_dt_len = la_layer_count * c->la_v_head_count;
   size_t la_decay_len = la_layer_count * c->la_v_head_count;
-  size_t la_conv_len =
-      la_layer_count * linear_qkv_dim * c->la_kernel_size;
+  size_t la_conv_len = la_layer_count * linear_qkv_dim * c->la_kernel_size;
   size_t la_norm_len = la_layer_count * c->la_v_head_dim;
-  size_t la_out_len =
-      la_layer_count * c->embedding_dim * linear_v_dim;
+  size_t la_out_len = la_layer_count * c->embedding_dim * linear_v_dim;
   size_t ffn_norm_len = n * c->embedding_dim;
   size_t ffn_fc_len = n * c->embedding_dim * c->hidden_dim;
   size_t ffn_up_len = n * c->embedding_dim * c->hidden_dim;
@@ -1249,14 +1284,14 @@ double transformer_layer_size_gb(
   double ffn_fc_gb = (ffn_fc_len * sizeof(*w->ffn_fc_weight)) / gb;
   double ffn_up_gb = (ffn_up_len * sizeof(*w->ffn_up_weight)) / gb;
   double ffn_out_gb = (ffn_out_len * sizeof(*w->ffn_out_weight)) / gb;
-  double total_gb = mha_norm_gb + mha_q_gb + mha_k_gb + mha_v_gb +
-                    mha_out_gb + la_qkv_gb + la_gate_gb + la_alpha_gb +
-                    la_beta_gb + la_dt_gb + la_decay_gb + la_conv_gb +
-                    la_norm_gb + la_out_gb + ffn_norm_gb + ffn_fc_gb +
-                    ffn_up_gb + ffn_out_gb;
+  double total_gb = mha_norm_gb + mha_q_gb + mha_k_gb + mha_v_gb + mha_out_gb +
+                    la_qkv_gb + la_gate_gb + la_alpha_gb + la_beta_gb +
+                    la_dt_gb + la_decay_gb + la_conv_gb + la_norm_gb +
+                    la_out_gb + ffn_norm_gb + ffn_fc_gb + ffn_up_gb +
+                    ffn_out_gb;
 
   char s[SAFETENSORS_MAX_STRING];
-  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_norm", mha_norm_gb);
+  snprintf(s, sizeof(s), "--- %10s (%7.4f GB)", "mha_norm_weight", mha_norm_gb);
   util_matrix_summary(s, 1, mha_norm_len, 3, w->mha_norm_weight);
 
   if (fa_layer_count > 0) {
@@ -1368,9 +1403,7 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   fprintf(f, "--- la_v_head_dim:      %zu\n", c->la_v_head_dim);
   fprintf(f, "--- la_v_head_count:    %zu\n", c->la_v_head_count);
   fprintf(
-      f,
-      "--- mha_output_gate:    %s\n",
-      c->mha_output_gate ? "true" : "false"
+      f, "--- mha_output_gate:    %s\n", c->mha_output_gate ? "true" : "false"
   );
   fprintf(f, "--- vocabulary_len:     %zu\n", c->vocabulary_len);
   fprintf(f, "--- context_len:        %zu\n", c->context_len);
@@ -1427,12 +1460,12 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   }
   fprintf(f, "---  total size:%7.4f GB\n", total_gb);
 
-  #ifdef DEBUG
+#ifdef DEBUG
   fprintf(f, "- Layer 0 weights:\n");
   double layer_0_size = 0;
   layer_0_size += transformer_layer_size_gb(f, transformer, 1);
   fprintf(f, "---  total size:%7.4f GB\n", layer_0_size);
-  #endif
+#endif
 }
 
 // Allocate a logits buffer for a given number of tokens
@@ -1456,6 +1489,37 @@ float* transformer_logits_malloc(
 // ----------------------------------------------------------------------------
 // ----------------------------------------------------------------------------
 
+// sigmoid operation
+// Used by full-attention output gate and linear-attention beta gate
+static float sigmoid(float x) {
+  return 1.0f / (1.0f + expf(-x));
+}
+// SiLU
+// Used after depthwise conv in linear attention and in gated output norm
+static float silu(float x) {
+  return x * sigmoid(x);
+}
+// Softplus activation (smooth ReLU)
+// softplus(x) = log(1 + exp(x))
+// For large x, log(1+exp(x)) ≈ x; clamp avoids overflow in expf
+// Used inside the linear-attention decay: exp(softplus(α + bias) * A_log)
+static float softplus(float x) {
+  return x > 20 ? x : logf(1 + expf(x));
+}
+
+// L2 normalization of a single attention head
+// x[i] = x[i] / sqrt((sum_j x[j]^2) + eps)
+// Applied to Q and K after conv in linear attention (before RoPE-free
+// recurrence)
+static void l2norm_head(size_t dim, float* x, float eps) {
+  float ss = 0.0f;
+  for (size_t i = 0; i < dim; i++)
+    ss += x[i] * x[i];
+  float inv = 1.0f / sqrtf(ss + eps);
+  for (size_t i = 0; i < dim; i++)
+    x[i] *= inv;
+}
+
 // RMSNorm (Root Mean Square Normalization) + scaling operation
 // y = (x / sqrt(mean(x**2) + epsilon)) * w
 static void rmsnorm(
@@ -1463,7 +1527,8 @@ static void rmsnorm(
     float y[embedding_dim],
     float x[embedding_dim],
     uint16_t w[embedding_dim],
-    float epsilon
+    float epsilon,
+    bool one_offset
 ) {
   // Calculate sum of squares
   float ss = 0.0f;
@@ -1474,11 +1539,116 @@ static void rmsnorm(
   ss = (float)(1. / sqrtf(ss + epsilon));
   // Normalize and scale
   for (size_t j = 0; j < embedding_dim; j++) {
-    y[j] =  (x[j] * ss);
+    y[j] = (x[j] * ss);
   }
-    for (size_t j = 0; j < embedding_dim; j++) {
-    y[j] *= util_bf16_to_f32(w[j]);
+  for (size_t j = 0; j < embedding_dim; j++) {
+    // Qwen3.5 adds 1 to each value of the weight using a one_offset
+    float g = util_bf16_to_f32(w[j]);
+    y[j] *= one_offset ? (1.0f + g) : g;
   }
+}
+
+// RMSNorm + SiLU gate (linear-attention output norm)
+// y = (x / sqrt(mean(x**2) + epsilon)) * w * silu(gate)
+// w is F32 (la_norm_weight) whereas rmsnorm() uses BF16 weights elsewhere
+static void rmsnorm_gated(
+    size_t embedding_dim,
+    float y[embedding_dim],
+    float x[embedding_dim],
+    float w[embedding_dim],
+    float epsilon,
+    float gate[embedding_dim]
+) {
+  float ss = 0.0f;
+  for (size_t i = 0; i < embedding_dim; i++) {
+    ss += x[i] * x[i];
+  }
+  ss = 1.0f / sqrtf(ss / embedding_dim + epsilon);
+  for (size_t i = 0; i < embedding_dim; i++) {
+    y[i] = (x[i] * ss) * w[i] * silu(gate[i]);
+  }
+}
+
+// Interleaved multi-dimensional RoPE (IMRoPE), applied in-place to one Q/K head
+//
+// Rotates the first n_rot dimensions of x; x[n_rot .. head_dim-1] is unchanged
+// For each complex pair (i0, i0 + n_rot/2), NEOX-style:
+//   [x0', x1'] = [cos θ · x0 - sin θ · x1,  sin θ · x0 + cos θ · x1]
+//
+// θ depends on pair index and mrope_sections[4] = [t, h, w, e]:
+//   sector = (i0/2) % sect_dims picks which position stream feeds the angle
+//   (text-only inference: all streams use the same pos, so t/h/w/e collapse)
+//
+// Frequency per pair: θ_scale = rope_theta^(-2/n_rot), advanced each pair
+static void imrope(
+    float* x,
+    size_t head_dim,
+    size_t n_rot,
+    const size_t sections[4],
+    size_t pos,
+    float rope_theta
+) {
+  // n_rot comes from partial_rotary_factor * head_dim (e.g. 0.25 * 256 = 64)
+  if (n_rot == 0 || n_rot > head_dim) {
+    return;
+  }
+  const size_t sect_dims =
+      sections[0] + sections[1] + sections[2] + sections[3];
+  if (sect_dims == 0) {
+    return;
+  }
+  // Base frequency decay between RoPE pairs
+  const float freq_scale = 1.0f;
+  const float theta_scale = powf(rope_theta, -2.0f / (float)n_rot);
+
+  // Independent position accumulators for t/h/w/e
+  float theta_t = (float)pos;
+  float theta_h = (float)pos;
+  float theta_w = (float)pos;
+  float theta_e = (float)pos;
+
+  const size_t half = n_rot / 2;
+  float cache_cos[n_rot / 2];
+  float cache_sin[n_rot / 2];
+
+  // Precompute cos/sin for each pair before applying rotations
+  for (size_t i0 = 0; i0 < n_rot; i0 += 2) {
+    const size_t pair = i0 / 2;
+    const size_t sector = pair % sect_dims;
+
+    // Interleaved section routing:
+    float theta = theta_t;
+    if (sector % 3 == 1 && sector < 3 * sections[1]) {
+      theta = theta_h;
+    } else if (sector % 3 == 2 && sector < 3 * sections[2]) {
+      theta = theta_w;
+    } else if (sector % 3 == 0 && sector < 3 * sections[0]) {
+      theta = theta_t;
+    } else {
+      theta = theta_e;
+    }
+
+    const float angle = freq_scale * theta;
+    cache_cos[pair] = cosf(angle);
+    cache_sin[pair] = sinf(angle);
+
+    // Advance each stream’s frequency for the next pair
+    theta_t *= theta_scale;
+    theta_h *= theta_scale;
+    theta_w *= theta_scale;
+    theta_e *= theta_scale;
+  }
+
+  // Apply 2D rotations: pair i with i + n_rot/2 (NEOX layout)
+  for (size_t ic = 0; ic < half; ic++) {
+    const float cos_t = cache_cos[ic];
+    const float sin_t = cache_sin[ic];
+    const float x0 = x[ic];
+    const float x1 = x[ic + half];
+    x[ic] = x0 * cos_t - x1 * sin_t;
+    x[ic + half] = x0 * sin_t + x1 * cos_t;
+  }
+  // x[n_rot .. head_dim-1] remains unchanged
 }
 
 // Softmax operation on rows of x:
@@ -1521,9 +1691,7 @@ void softmax(
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 static inline float dot(
-  size_t len,
-  float activation[restrict len],
-  uint16_t weight[restrict len]
+    size_t len, float activation[restrict len], uint16_t weight[restrict len]
 ) {
   float32x4_t dot_0 = vdupq_n_f32(0.0);
   float32x4_t dot_1 = vdupq_n_f32(0.0);
@@ -1532,9 +1700,9 @@ static inline float dot(
 
   for (size_t i = 0; i < len; i += 16) {
     // Read 16 float32 activations
-    float32x4_t activation_0 = vld1q_f32(&activation[i +  0]);
-    float32x4_t activation_1 = vld1q_f32(&activation[i +  4]);
-    float32x4_t activation_2 = vld1q_f32(&activation[i +  8]);
+    float32x4_t activation_0 = vld1q_f32(&activation[i + 0]);
+    float32x4_t activation_1 = vld1q_f32(&activation[i + 4]);
+    float32x4_t activation_2 = vld1q_f32(&activation[i + 8]);
     float32x4_t activation_3 = vld1q_f32(&activation[i + 12]);
 
     // Read 16 BF16 weights and expand them to float32
@@ -1578,31 +1746,29 @@ static inline float dot(
 #elif defined __AVX2__
 #include <immintrin.h>
 static inline float dot(
-  size_t len,
-  float activation[restrict len],
-  uint16_t weight[restrict len]
+    size_t len, float activation[restrict len], uint16_t weight[restrict len]
 ) {
   __m256 dot_0 = _mm256_setzero_ps();
   __m256 dot_1 = _mm256_setzero_ps();
   __m256 dot_2 = _mm256_setzero_ps();
   __m256 dot_3 = _mm256_setzero_ps();
 
-  float *a = __builtin_assume_aligned(activation, 32);
-  uint16_t *w = __builtin_assume_aligned(weight, 32);
+  float* a = __builtin_assume_aligned(activation, 32);
+  uint16_t* w = __builtin_assume_aligned(weight, 32);
 
   for (size_t i = 0; i < len; i += 32) {
     // Read 32 float32 activations
-    __m256 activation_0 = _mm256_load_ps(&a[i +  0]);
-    __m256 activation_1 = _mm256_load_ps(&a[i +  8]);
+    __m256 activation_0 = _mm256_load_ps(&a[i + 0]);
+    __m256 activation_1 = _mm256_load_ps(&a[i + 8]);
     __m256 activation_2 = _mm256_load_ps(&a[i + 16]);
     __m256 activation_3 = _mm256_load_ps(&a[i + 24]);
 
     // Read 32 BF16 weights and expand them to float32
     // - Load BF16 vectors as int32
-    __m128i u16_0 = _mm_load_si128((const __m128i *)&w[i +  0]);
-    __m128i u16_1 = _mm_load_si128((const __m128i *)&w[i +  8]);
-    __m128i u16_2 = _mm_load_si128((const __m128i *)&w[i + 16]);
-    __m128i u16_3 = _mm_load_si128((const __m128i *)&w[i + 24]);
+    __m128i u16_0 = _mm_load_si128((const __m128i*)&w[i + 0]);
+    __m128i u16_1 = _mm_load_si128((const __m128i*)&w[i + 8]);
+    __m128i u16_2 = _mm_load_si128((const __m128i*)&w[i + 16]);
+    __m128i u16_3 = _mm_load_si128((const __m128i*)&w[i + 24]);
     // - Zero-extend u16 values to u32 (BF16 bits in the low 16 bits for now)
     __m256i u32_0 = _mm256_cvtepu16_epi32(u16_0);
     __m256i u32_1 = _mm256_cvtepu16_epi32(u16_1);
@@ -1639,20 +1805,18 @@ static inline float dot(
   __m256 sum256 = _mm256_add_ps(dot_01, dot_23);
   // No "sum all lanes" instruction like vaddvq_f32 on ARM, so work a bit
   // sum256 holds 8 floats: s0 s1 s2 s3 s4 s5 s6 s7 (below G: garbage)
-  __m128 lo = _mm256_castps256_ps128(sum256); // s0 s1 s2 s3
+  __m128 lo = _mm256_castps256_ps128(sum256);   // s0 s1 s2 s3
   __m128 hi = _mm256_extractf128_ps(sum256, 1); // s3 s4 s5 s6 s7
-  __m128 sum128 = _mm_add_ps(lo, hi); // s0+s4 s1+s5 s2+s6 s3+s7
-  __m128 shuf = _mm_movehdup_ps(sum128); // s1+s5 s1+s5 s3+s7 s3+s7
-  __m128 sums = _mm_add_ps(sum128, shuf); // s0+s4+s1+s5 G s2+s6+s3+s7 G
-  shuf = _mm_movehl_ps(shuf, sums); // s2+s6+s3+s7 G G G
-  sums = _mm_add_ss(sums, shuf); // s0+s4+s1+s5+s2+s6+s3+s7 G G G
-  return _mm_cvtss_f32(sums); // extract total
+  __m128 sum128 = _mm_add_ps(lo, hi);           // s0+s4 s1+s5 s2+s6 s3+s7
+  __m128 shuf = _mm_movehdup_ps(sum128);        // s1+s5 s1+s5 s3+s7 s3+s7
+  __m128 sums = _mm_add_ps(sum128, shuf);       // s0+s4+s1+s5 G s2+s6+s3+s7 G
+  shuf = _mm_movehl_ps(shuf, sums);             // s2+s6+s3+s7 G G G
+  sums = _mm_add_ss(sums, shuf);                // s0+s4+s1+s5+s2+s6+s3+s7 G G G
+  return _mm_cvtss_f32(sums);                   // extract total
 }
 #else
 static inline float dot(
-  size_t len,
-  float activation[restrict len],
-  uint16_t weight[restrict len]
+    size_t len, float activation[restrict len], uint16_t weight[restrict len]
 ) {
   float dot = 0.;
   for (size_t i = 0; i < len; i++) {
@@ -1661,6 +1825,36 @@ static inline float dot(
   return dot;
 }
 #endif
+
+// Helper function allowing us to apply the correct RoPE according to our model.
+// Needed to assure support of different structures of transformers.
+static void rope_head_inplace(
+    float* x,
+    size_t head_dim,
+    size_t pos,
+    bool use_imrope,
+    size_t n_rot,
+    const size_t mrope_sections[4],
+    float rope_theta,
+    const float* rope_row,
+    size_t rope_pair_bound,
+    size_t rope_pair_offset,
+    size_t rope_pair_stride
+) {
+  if (use_imrope) { // Qwen3.5 uses IMRoPE
+    imrope(x, head_dim, n_rot, mrope_sections, pos, rope_theta);
+    return;
+  }
+  // Any other model uses normal RoPE
+  for (size_t h = 0; h < rope_pair_bound; h += rope_pair_stride) {
+    float fr = rope_row[h + 0];
+    float fi = rope_row[h + rope_pair_offset];
+    float v0 = x[h + 0];
+    float v1 = x[h + rope_pair_offset];
+    x[h + 0] = v0 * fr - v1 * fi;
+    x[h + rope_pair_offset] = v0 * fi + v1 * fr;
+  }
+}
 
 // Here is the compute function. Yep, LLMs are just that simple :)!
 // Execute the transformer model on a chunk of tokens, i.e. computes the
@@ -1689,10 +1883,15 @@ static void transformer_predict_chunk(
     size_t la_v_head_dim,
     size_t la_v_head_count,
     size_t la_qkv_dim,
+    size_t la_v_dim,
     bool mha_output_gate,
     size_t rope_pair_bound,
     size_t rope_pair_offset,
     size_t rope_pair_stride,
+    size_t mrope_section_count,
+    size_t* mrope_section,
+    size_t n_rot,
+    float rope_theta,
     float epsilon,
     // Weights
     uint16_t embedding_weight[restrict vocabulary_len][embedding_dim],
@@ -1747,39 +1946,48 @@ static void transformer_predict_chunk(
     float k_cache[restrict layer_count][kv_head_count][context_len][head_dim],
     float v_cache[restrict layer_count][kv_head_count][context_len][head_dim],
     float rope_cos_sin[restrict context_len][head_dim],
+    float la_conv_state[la_layer_count][la_qkv_dim][la_kernel_size - 1],
+    float la_ssm_state[la_layer_count][la_v_head_count][la_v_head_dim]
+                      [la_k_head_dim],
+    float la_qkv_mixed[la_qkv_dim],
+    float la_conv_out[la_qkv_dim],
+    float la_z[la_v_head_count][la_v_head_dim],
+    float la_out_flat[la_v_head_count][la_v_head_dim],
     // Output
     size_t logits_count,
     float logits[restrict TRANSFORMER_CHUNK_MAX_LEN][vocabulary_len]
 ) {
   (void)q_head_count; // Unused except in debug mode
-  (void)layer_types;
+  // (void)layer_types;
   (void)fa_layer_count;
-  (void)la_kernel_size;
-  (void)la_k_head_dim;
-  (void)la_k_head_count;
-  (void)la_v_head_dim;
-  (void)la_v_head_count;
-  (void)la_qkv_dim;
+  // (void)la_kernel_size;
+  // (void)la_k_head_dim;
+  // (void)la_k_head_count;
+  // (void)la_v_head_dim;
+  // (void)la_v_head_count;
+  // (void)la_qkv_dim;
   (void)mha_gate_weight;
-  (void)la_qkv_weight;
-  (void)la_gate_weight;
-  (void)la_alpha_weight;
-  (void)la_beta_weight;
-  (void)la_dt_bias;
-  (void)la_decay_weight;
-  (void)la_conv_weight;
-  (void)la_norm_weight;
-  (void)la_out_weight;
+  // (void)mha_output_gate;
+  (void)la_layer_count;
+  // (void)la_qkv_weight;
+  // (void)la_gate_weight;
+  // (void)la_alpha_weight;
+  // (void)la_beta_weight;
+  // (void)la_dt_bias;
+  // (void)la_decay_weight;
+  // (void)la_conv_weight;
+  // (void)la_norm_weight;
+  // (void)la_out_weight;
 
-  if (la_layer_count > 0) {
-    UTIL_DIE("linear attention inference is not implemented yet");
+  const bool use_imrope = mrope_section_count > 0 && mrope_section != NULL;
+  size_t mrope_sections[4] = {0, 0, 0, 0};
+  if (mrope_section_count > 0 && mrope_section != NULL) {
+    for (size_t i = 0; i < mrope_section_count && i < 4; i++) {
+      mrope_sections[i] = mrope_section[i];
+    }
   }
-  if (mha_output_gate) {
-    UTIL_DIE("gated full attention inference is not implemented yet");
-  }
-
-  // Convert token ids to embedding vector representation
-  #pragma omp single
+// Convert token ids to embedding vector representation
+#pragma omp single
   {
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
@@ -1789,227 +1997,364 @@ static void transformer_predict_chunk(
   }
 
   // Execute decoder layers
+  size_t fa = 0, la = 0;
   for (size_t l = 0; l < layer_count; l++) {
-    // Attention rmsnorm: normalize the embedding vectors for the current layer
-    #pragma omp single
+// Attention rmsnorm: normalize the embedding vectors for the current layer
+#pragma omp single
     for (size_t t = 0; t < token_count; t++) {
       rmsnorm(
           embedding_dim,
           mha_norm[t],
           embedding[t],
           mha_norm_weight[l],
-          epsilon
+          epsilon,
+          mha_output_gate
       );
     }
 
-    // K matmul for all KV-heads, storing in the k_cache
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h++) {
-          k_cache[l][k][cached_count + t][h] =
-              dot(embedding_dim, mha_norm[t], mha_k_weight[l][k][h]);
-        }
-      }
-    }
-
-    // V matmul for all KV-heads, storing in the v_cache
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < head_dim; h++) {
-          v_cache[l][k][cached_count + t][h] =
-              dot(embedding_dim, mha_norm[t], mha_v_weight[l][k][h]);
-        }
-      }
-    }
-
-    // Per-head normalization of K, if applicable
-    if (mha_k_norm_weight) {
-      #pragma omp for collapse(2) schedule(static) nowait
+    if (layer_types[l] == TRANSFORMER_LAYER_TYPE_FA) { // Full attention
+      // K matmul for all KV-heads, storing in the k_cache
+#pragma omp for collapse(2) schedule(static) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t t = 0; t < token_count; t++) {
-          rmsnorm(
-              head_dim,
-              k_cache[l][k][cached_count + t],
-              k_cache[l][k][cached_count + t],
-              mha_k_norm_weight[l],
-              epsilon
-          );
-        }
-      }
-    }
-
-    // RoPE K for all KV-heads: complex-valued rotate K in each head
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t t = 0; t < token_count; t++) {
-        for (size_t h = 0; h < rope_pair_bound; h += rope_pair_stride) {
-          float fr = rope_cos_sin[cached_count + t][h + 0];
-          float fi = rope_cos_sin[cached_count + t][h + rope_pair_offset];
-          float v0 = k_cache[l][k][cached_count + t][h + 0];
-          float v1 = k_cache[l][k][cached_count + t][h + rope_pair_offset];
-          k_cache[l][k][cached_count + t][h + 0] = v0 * fr - v1 * fi;
-          k_cache[l][k][cached_count + t][h + rope_pair_offset] =
-              v0 * fi + v1 * fr;
-        }
-      }
-    }
-
-    #pragma omp barrier
-
-    // Q matmul for all Q-heads
-    #pragma omp for collapse(3) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
-        for (size_t t = 0; t < token_count; t++) {
           for (size_t h = 0; h < head_dim; h++) {
-            mha_q[k][q][t][h] =
-                dot(embedding_dim, mha_norm[t], mha_q_weight[l][k][q][h]);
+            k_cache[l][k][cached_count + t][h] =
+                dot(embedding_dim, mha_norm[t], mha_k_weight[fa][k][h]);
           }
         }
       }
-    }
 
-    // Per-head normalization of Q, if applicable
-    if (mha_q_norm_weight) {
-      #pragma omp for collapse(3) schedule(static) nowait
+// V matmul for all KV-heads, storing in the v_cache
+#pragma omp for collapse(2) schedule(static) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
-        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+        for (size_t t = 0; t < token_count; t++) {
+          for (size_t h = 0; h < head_dim; h++) {
+            v_cache[l][k][cached_count + t][h] =
+                dot(embedding_dim, mha_norm[t], mha_v_weight[fa][k][h]);
+          }
+        }
+      }
+
+      // Per-head normalization of K, if applicable
+      if (mha_k_norm_weight) {
+#pragma omp for collapse(2) schedule(static) nowait
+        for (size_t k = 0; k < kv_head_count; k++) {
           for (size_t t = 0; t < token_count; t++) {
             rmsnorm(
                 head_dim,
-                mha_q[k][q][t],
-                mha_q[k][q][t],
-                mha_q_norm_weight[l],
-                epsilon
+                k_cache[l][k][cached_count + t],
+                k_cache[l][k][cached_count + t],
+                mha_k_norm_weight[fa],
+                epsilon,
+                mha_output_gate
             );
           }
         }
       }
-    }
 
-    // RoPE Q for all Q-heads: complex-valued rotate Q in each head
-    #pragma omp for collapse(3) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+// RoPE K for all KV-heads: complex-valued rotate K in each head
+#pragma omp for collapse(2) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t t = 0; t < token_count; t++) {
-          for (size_t h = 0; h < rope_pair_bound; h += rope_pair_stride) {
-            float fr = rope_cos_sin[cached_count + t][h + 0];
-            float fi = rope_cos_sin[cached_count + t][h + rope_pair_offset];
-            float v0 = mha_q[k][q][t][h + 0];
-            float v1 = mha_q[k][q][t][h + rope_pair_offset];
-            mha_q[k][q][t][h + 0] = v0 * fr - v1 * fi;
-            mha_q[k][q][t][h + rope_pair_offset] = v0 * fi + v1 * fr;
-          }
+          rope_head_inplace(
+              k_cache[l][k][cached_count + t],
+              head_dim,
+              cached_count + t,
+              use_imrope,
+              n_rot,
+              mrope_sections,
+              rope_theta,
+              rope_cos_sin[cached_count + t],
+              rope_pair_bound,
+              rope_pair_offset,
+              rope_pair_stride
+          );
         }
       }
-    }
 
-    // Multihead attention. iterate over all Q-heads
-    #pragma omp for collapse(3) schedule(static) nowait
-    for (size_t k = 0; k < kv_head_count; k++) {
-      for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
-        for (size_t t = 0; t < token_count; t++) {
-          // Calculate the attention score: QKˆT / sqrt(head_dim)
-          // Here we don't use mask but a triangular loop (no compute
-          // for future tokens)
-          for (size_t s = 0; s < cached_count + t + 1; s++) {
-            mha_score[k][q][t][s] = 0.0f;
+#pragma omp barrier
+
+// Q matmul for all Q-heads
+#pragma omp for collapse(3) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
             for (size_t h = 0; h < head_dim; h++) {
-              mha_score[k][q][t][s] +=
-                  mha_q[k][q][t][h] * k_cache[l][k][s][h];
-            }
-            mha_score[k][q][t][s] /= sqrtf(head_dim);
-          }
-
-          // Softmax the scores to get attention weights
-          // - Find max value (for numerical stability)
-          float max = mha_score[k][q][t][0];
-          for (size_t s = 1; s < cached_count + t + 1; s++) {
-            max = (mha_score[k][q][t][s] > max) ? mha_score[k][q][t][s] : max;
-          }
-          // - Exp and sum
-          float sum = 0.0f;
-          for (size_t s = 0; s < cached_count + t + 1; s++) {
-            mha_score[k][q][t][s] = expf(mha_score[k][q][t][s] - max);
-            sum += mha_score[k][q][t][s];
-          }
-          // - Normalize
-          for (size_t s = 0; s < cached_count + t + 1; s++) {
-            mha_score[k][q][t][s] /= sum;
-          }
-
-          // Weighted sum of the values, here the access function of
-          // mha_att is to please the output matmul
-          for (size_t h = 0; h < head_dim; h++) {
-            mha_att[t][k][q][h] = 0.0f;
-          }
-          for (size_t s = 0; s < cached_count + t + 1; s++) {
-            for (size_t h = 0; h < head_dim; h++) {
-              mha_att[t][k][q][h] +=
-                  mha_score[k][q][t][s] * v_cache[l][k][s][h];
+              mha_q[k][q][t][h] =
+                  dot(embedding_dim, mha_norm[t], mha_q_weight[fa][k][q][h]);
             }
           }
         }
       }
-    }
 
-    #pragma omp barrier
-
-    // Final matmul to get the output of the attention
-    // Note we reshape mha_att[t][k][q][h] to mha_att[t][kqh] with
-    // 0 <= kqh < embedding_dim (just casting because memory layout is ok)
-    #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < embedding_dim; e++) {
-        mha_out[t][e] =
-            dot(q_head_count * head_dim,
-                ((float (*)[q_head_count * head_dim])mha_att)[t],
-                mha_out_weight[l][e]);
+      // Per-head normalization of Q, if applicable
+      if (mha_q_norm_weight) {
+#pragma omp for collapse(3) schedule(static) nowait
+        for (size_t k = 0; k < kv_head_count; k++) {
+          for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+            for (size_t t = 0; t < token_count; t++) {
+              rmsnorm(
+                  head_dim,
+                  mha_q[k][q][t],
+                  mha_q[k][q][t],
+                  mha_q_norm_weight[fa],
+                  epsilon,
+                  mha_output_gate
+              );
+            }
+          }
+        }
       }
+
+// RoPE Q for all Q-heads: complex-valued rotate Q in each head
+#pragma omp for collapse(3) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
+            rope_head_inplace(
+                mha_q[k][q][t],
+                head_dim,
+                cached_count + t,
+                use_imrope,
+                n_rot,
+                mrope_sections,
+                rope_theta,
+                rope_cos_sin[cached_count + t],
+                rope_pair_bound,
+                rope_pair_offset,
+                rope_pair_stride
+            );
+          }
+        }
+      }
+
+// Multihead attention. iterate over all Q-heads
+#pragma omp for collapse(3) schedule(static) nowait
+      for (size_t k = 0; k < kv_head_count; k++) {
+        for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
+          for (size_t t = 0; t < token_count; t++) {
+            // Calculate the attention score: QKˆT / sqrt(head_dim)
+            // Here we don't use mask but a triangular loop (no compute
+            // for future tokens)
+            for (size_t s = 0; s < cached_count + t + 1; s++) {
+              mha_score[k][q][t][s] = 0.0f;
+              for (size_t h = 0; h < head_dim; h++) {
+                mha_score[k][q][t][s] +=
+                    mha_q[k][q][t][h] * k_cache[l][k][s][h];
+              }
+              mha_score[k][q][t][s] /= sqrtf(head_dim);
+            }
+
+            // Softmax the scores to get attention weights
+            // - Find max value (for numerical stability)
+            float max = mha_score[k][q][t][0];
+            for (size_t s = 1; s < cached_count + t + 1; s++) {
+              max = (mha_score[k][q][t][s] > max) ? mha_score[k][q][t][s] : max;
+            }
+            // - Exp and sum
+            float sum = 0.0f;
+            for (size_t s = 0; s < cached_count + t + 1; s++) {
+              mha_score[k][q][t][s] = expf(mha_score[k][q][t][s] - max);
+              sum += mha_score[k][q][t][s];
+            }
+            // - Normalize
+            for (size_t s = 0; s < cached_count + t + 1; s++) {
+              mha_score[k][q][t][s] /= sum;
+            }
+
+            // Weighted sum of the values, here the access function of
+            // mha_att is to please the output matmul
+            for (size_t h = 0; h < head_dim; h++) {
+              mha_att[t][k][q][h] = 0.0f;
+            }
+            for (size_t s = 0; s < cached_count + t + 1; s++) {
+              for (size_t h = 0; h < head_dim; h++) {
+                mha_att[t][k][q][h] +=
+                    mha_score[k][q][t][s] * v_cache[l][k][s][h];
+              }
+            }
+            if (mha_gate_weight) {
+              for (size_t h = 0; h < head_dim; h++) {
+                mha_att[t][k][q][h] *= sigmoid(dot(
+                    embedding_dim, mha_norm[t], mha_gate_weight[fa][k][q][h]
+                ));
+              }
+            }
+          }
+        }
+      }
+#pragma omp barrier
+
+// Final matmul to get the output of the attention
+// Note we reshape mha_att[t][k][q][h] to mha_att[t][kqh] with
+// 0 <= kqh < embedding_dim (just casting because memory layout is ok)
+#pragma omp for collapse(2) schedule(static) nowait
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t e = 0; e < embedding_dim; e++) {
+          mha_out[t][e] =
+              dot(q_head_count * head_dim,
+                  ((float (*)[q_head_count * head_dim]) mha_att)[t],
+                  mha_out_weight[fa][e]);
+        }
+      }
+      fa++;
+    } else if (layer_types[l] == TRANSFORMER_LAYER_TYPE_LA) { // Linear
+                                                              // attention
+#pragma omp single
+      {
+        const size_t conv_ring = la_kernel_size - 1;
+        const size_t k_offset = la_k_head_count * la_k_head_dim;
+        const size_t v_offset = 2 * la_k_head_count * la_k_head_dim;
+        const float q_scale = 1.0f / sqrtf((float)la_k_head_dim);
+
+        float beta[la_v_head_count];
+        float decay[la_v_head_count];
+        // projections
+        for (size_t t = 0; t < token_count; t++) {
+          for (size_t c = 0; c < la_qkv_dim; c++) {
+            la_qkv_mixed[c] =
+                dot(embedding_dim, mha_norm[t], la_qkv_weight[la][c]);
+          }
+          for (size_t h = 0; h < la_v_head_count; h++) {
+            for (size_t v = 0; v < la_v_head_dim; v++) {
+              la_z[h][v] =
+                  dot(embedding_dim, mha_norm[t], la_gate_weight[la][h][v]);
+            }
+            beta[h] =
+                sigmoid(dot(embedding_dim, mha_norm[t], la_beta_weight[la][h]));
+            float alpha =
+                dot(embedding_dim, mha_norm[t], la_alpha_weight[la][h]);
+            decay[h] = expf(
+                softplus(alpha + util_bf16_to_f32(la_dt_bias[la][h])) *
+                la_decay_weight[la][h]
+            );
+          }
+          // 2) depthwise conv1d + SiLU, update ring
+          for (size_t c = 0; c < la_qkv_dim; c++) {
+            float acc = 0.0f;
+            for (size_t j = 0; j < conv_ring; j++) {
+              acc += util_bf16_to_f32(la_conv_weight[la][c][j]) *
+                     la_conv_state[la][c][j];
+            }
+            acc += util_bf16_to_f32(la_conv_weight[la][c][conv_ring]) *
+                   la_qkv_mixed[c];
+            la_conv_out[c] = silu(acc);
+            for (size_t j = 0; j + 1 < conv_ring; j++) {
+              la_conv_state[la][c][j] = la_conv_state[la][c][j + 1];
+            }
+            if (conv_ring > 0) {
+              la_conv_state[la][c][conv_ring - 1] = la_qkv_mixed[c];
+            }
+          }
+          // 3–7) split q/k/v, norm, recurrence, gated norm, out proj
+          for (size_t h = 0; h < la_v_head_count; h++) {
+            size_t q_h = h;
+            size_t k_h = h;
+            if (la_k_head_count != la_v_head_count) {
+              q_h = h % la_k_head_count;
+              k_h = h % la_k_head_count;
+            }
+            float* q = la_conv_out + q_h * la_k_head_dim;
+            float* k = la_conv_out + k_offset + k_h * la_k_head_dim;
+            float* v = la_conv_out + v_offset + h * la_v_head_dim;
+            l2norm_head(la_k_head_dim, q, epsilon);
+            l2norm_head(la_k_head_dim, k, epsilon);
+            for (size_t i = 0; i < la_k_head_dim; i++) {
+              q[i] *= q_scale;
+            }
+
+            const float g_h = decay[h];
+            const float b_h = beta[h];
+            float d[la_v_head_dim];
+            float o[la_v_head_dim];
+            // decay S
+            for (size_t vi = 0; vi < la_v_head_dim; vi++) {
+              for (size_t ki = 0; ki < la_k_head_dim; ki++) {
+                la_ssm_state[la][h][vi][ki] *= g_h;
+              }
+            }
+            // predict + delta update
+            for (size_t vi = 0; vi < la_v_head_dim; vi++) {
+              float sk = 0.0f;
+              for (size_t ki = 0; ki < la_k_head_dim; ki++) {
+                sk += la_ssm_state[la][h][vi][ki] * k[ki];
+              }
+              d[vi] = (v[vi] - sk) * b_h;
+            }
+            for (size_t vi = 0; vi < la_v_head_dim; vi++) {
+              for (size_t ki = 0; ki < la_k_head_dim; ki++) {
+                la_ssm_state[la][h][vi][ki] += k[ki] * d[vi];
+              }
+            }
+            // output o = S @ q
+            for (size_t vi = 0; vi < la_v_head_dim; vi++) {
+              o[vi] = 0.0f;
+              for (size_t ki = 0; ki < la_k_head_dim; ki++) {
+                o[vi] += la_ssm_state[la][h][vi][ki] * q[ki];
+              }
+            }
+            rmsnorm_gated(
+                la_v_head_dim,
+                la_out_flat[h],
+                o,
+                la_norm_weight[la],
+                epsilon,
+                la_z[h]
+            );
+          }
+          for (size_t e = 0; e < embedding_dim; e++) {
+            mha_out[t][e] =
+                dot(la_v_dim, la_out_flat[0], la_out_weight[la][e][0]);
+          }
+        }
+        la++;
+      }
+
+    } else {
+      UTIL_DIE("layer type is not recognised or is not implemented yet");
     }
 
-    // Residual connection back into x
-    #pragma omp for collapse(2) schedule(static) nowait
+// Residual connection back into x
+#pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         embedding[t][e] += mha_out[t][e];
       }
     }
 
-    #pragma omp barrier
+#pragma omp barrier
 
-    // Feed-forward network's rmsnorm
-    #pragma omp single
+// Feed-forward network's rmsnorm
+#pragma omp single
     for (size_t t = 0; t < token_count; t++) {
       rmsnorm(
           embedding_dim,
           ffn_norm[t],
           embedding[t],
           ffn_norm_weight[l],
-          epsilon
+          epsilon,
+          mha_output_gate
       );
     }
 
-    // Feed-forward's fully-connected matmul (a.k.a. gate)
-    #pragma omp for collapse(2) schedule(static) nowait
+// Feed-forward's fully-connected matmul (a.k.a. gate)
+#pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t h = 0; h < hidden_dim; h++) {
         ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
       }
     }
 
-    // Feed-forward's up matmul
-    #pragma omp for collapse(2) schedule(static) nowait
+// Feed-forward's up matmul
+#pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t h = 0; h < hidden_dim; h++) {
         ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
       }
     }
 
-    // SwiGLU non-linearity
-    #pragma omp for collapse(2) schedule(static) nowait
+// SwiGLU non-linearity
+#pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < hidden_dim; e++) {
         // SiLU(x)=x*σ(x), where σ(x) is the logistic sigmoid
@@ -2019,27 +2364,27 @@ static void transformer_predict_chunk(
       }
     }
 
-    #pragma omp barrier
+#pragma omp barrier
 
-    // Final matmul to get the output of the feed-forward network
-    #pragma omp for collapse(2) schedule(static) nowait
+// Final matmul to get the output of the feed-forward network
+#pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
       }
     }
 
-    // Residual connection
-    #pragma omp for collapse(2) schedule(static) nowait
+// Residual connection
+#pragma omp for collapse(2) schedule(static) nowait
     for (size_t t = 0; t < token_count; t++) {
       for (size_t e = 0; e < embedding_dim; e++) {
         embedding[t][e] += ffn_out[t][e];
       }
     }
 
-    #ifdef DEBUG
-    #pragma omp single
-    if (l == 0 || l == layer_count - 1) {
+#ifdef DEBUG
+#pragma omp single
+    if (l == 0 || l == layer_count - 1 || true) {
       size_t mha_len = token_count * embedding_dim;
       size_t norm_len = embedding_dim;
       size_t q_len = q_head_count * token_count * head_dim;
@@ -2064,11 +2409,10 @@ static void transformer_predict_chunk(
         for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
           for (size_t t = 0; t < token_count; t++) {
             for (size_t h = 0; h < head_dim; h++) {
-              q_flat[k * (q_head_per_kv_head_count * token_count * head_dim) +
-                     q * (token_count * head_dim) +
-                     t * (head_dim) +
-                     h] =
-                  mha_q[k][q][t][h];
+              q_flat
+                  [k * (q_head_per_kv_head_count * token_count * head_dim) +
+                   q * (token_count * head_dim) + t * (head_dim) + h] =
+                      mha_q[k][q][t][h];
             }
           }
         }
@@ -2090,10 +2434,19 @@ static void transformer_predict_chunk(
       fprintf(stderr, "Transformer state (activations) at layer %zu:\n", l);
       util_matrix_summary("- input emb", 1, mha_len, 3, (float*)input);
       util_matrix_summary("-  mha_norm", 1, mha_len, 3, (float*)mha_norm);
-      util_matrix_summary("-    q_flat", 1, q_len, 3, (float*)q_flat);
-      util_matrix_summary("-    k_flat", 1, kv_len, 3, (float*)k_flat);
-      util_matrix_summary("-    v_flat", 1, kv_len, 3, (float*)v_flat);
-      util_matrix_summary("-   mha_att", 1, att_len, 3, (float*)mha_att);
+      if (layer_types[l] == TRANSFORMER_LAYER_TYPE_LA) {
+        util_matrix_summary(
+            "- la_qkv_mix", 1, la_qkv_dim, 3, (float*)la_qkv_mixed
+        );
+        util_matrix_summary(
+            "- la_conv_out", 1, la_qkv_dim, 3, (float*)la_conv_out
+        );
+      } else {
+        util_matrix_summary("-    q_flat", 1, q_len, 3, (float*)q_flat);
+        util_matrix_summary("-    k_flat", 1, kv_len, 3, (float*)k_flat);
+        util_matrix_summary("-    v_flat", 1, kv_len, 3, (float*)v_flat);
+        util_matrix_summary("-   mha_att", 1, att_len, 3, (float*)mha_att);
+      }
       util_matrix_summary("-   mha_out", 1, mha_len, 3, (float*)mha_out);
       util_matrix_summary("-  ffn_norm", 1, mha_len, 3, (float*)ffn_norm);
       util_matrix_summary("-    ffn_fc", 1, hidden_len, 3, (float*)ffn_fc);
@@ -2106,25 +2459,26 @@ static void transformer_predict_chunk(
       free(k_flat);
       free(v_flat);
     }
-    #endif
+#endif
 
-    #pragma omp barrier
+#pragma omp barrier
   }
 
-  // Final rmsnorm
-  #pragma omp single
+// Final rmsnorm
+#pragma omp single
   for (size_t t = 0; t < token_count; t++) {
     rmsnorm(
         embedding_dim,
         embedding[t],
         embedding[t],
         out_norm_weight,
-        epsilon
+        epsilon,
+        mha_output_gate
     );
   }
 
-  // Classifier into logits
-  #pragma omp for collapse(2)
+// Classifier into logits
+#pragma omp for collapse(2)
   for (size_t l = 0; l < logits_count; l++) {
     for (size_t v = 0; v < vocabulary_len; v++) {
       logits[l][v] =
@@ -2168,6 +2522,11 @@ void transformer_predict(
   size_t hidden_dim = c->hidden_dim;
   size_t la_qkv_dim = 2 * (c->la_k_head_count * c->la_k_head_dim) +
                       (c->la_v_head_count * c->la_v_head_dim);
+  size_t la_v_head_count = c->la_v_head_count;
+  size_t la_v_head_dim = c->la_v_head_dim;
+  size_t la_k_head_dim = c->la_k_head_dim;
+  size_t la_kernel_size = c->la_kernel_size;
+  size_t la_v_dim = c->la_v_head_count * c->la_v_head_dim;
 
   // Clamp logits_count to available positions
   if (logits_count > token_count) {
@@ -2223,10 +2582,15 @@ void transformer_predict(
         c->la_v_head_dim,
         c->la_v_head_count,
         la_qkv_dim,
+        la_v_dim,
         c->mha_output_gate,
         c->rope_pair_bound,
         c->rope_pair_offset,
         c->rope_pair_stride,
+        c->mrope_section_count,
+        c->mrope_section,
+        c->n_rot,
+        c->rope_theta,
         c->epsilon,
 
         (uint16_t (*)[embedding_dim])w->embedding_weight,
@@ -2239,7 +2603,8 @@ void transformer_predict(
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_k_weight,
         (uint16_t (*)[head_dim])w->mha_k_norm_weight,
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_v_weight,
-        (uint16_t (*)[embedding_dim][q_head_count * head_dim])w->mha_out_weight,
+        (uint16_t (*)[embedding_dim][q_head_count * head_dim])
+            w->mha_out_weight,
         (uint16_t (*)[la_qkv_dim][embedding_dim])w->la_qkv_weight,
         (uint16_t (*)[c->la_v_head_count][c->la_v_head_dim][embedding_dim])
             w->la_gate_weight,
@@ -2275,12 +2640,19 @@ void transformer_predict(
         (float (*)[kv_head_count][context_len][head_dim])s->k_cache,
         (float (*)[kv_head_count][context_len][head_dim])s->v_cache,
         (float (*)[head_dim])s->rope_cos_sin,
+        (float (*)[la_qkv_dim][la_kernel_size - 1]) s->la_conv_state,
+        (float (*)[la_v_head_count][la_v_head_dim][la_k_head_dim])
+            s->la_ssm_state,
+        (float(*))s->la_qkv_mixed,
+        (float(*))s->la_conv_out,
+        (float (*)[la_v_head_dim])s->la_z,
+        (float (*)[la_v_head_dim])s->la_out_flat,
 
         chunk_logits_count,
         (float (*)[vocabulary_len])chunk_logits
     );
 
-    #pragma omp single
+#pragma omp single
     s->cached_count += chunk_token_count;
   }
 }
