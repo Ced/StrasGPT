@@ -34,8 +34,11 @@ struct options;
   "model.layers.%d.linear_attn.in_proj_a.weight"
 #define SAFETENSORS_PATTERN_LA_BETA_WEIGHT \
   "model.layers.%d.linear_attn.in_proj_b.weight"
-#define SAFETENSORS_PATTERN_LA_DT_BIAS "model.layers.%d.linear_attn.dt_bias"
-#define SAFETENSORS_PATTERN_LA_DECAY_WEIGHT "model.layers.%d.linear_attn.A_log"
+// clang-format off
+#define SAFETENSORS_PATTERN_LA_DT_BIAS \
+  "model.layers.%d.linear_attn.dt_bias"
+#define SAFETENSORS_PATTERN_LA_DECAY_WEIGHT \
+  "model.layers.%d.linear_attn.A_log"
 #define SAFETENSORS_PATTERN_LA_CONV_WEIGHT \
   "model.layers.%d.linear_attn.conv1d.weight"
 #define SAFETENSORS_PATTERN_LA_NORM_WEIGHT \
@@ -44,13 +47,17 @@ struct options;
   "model.layers.%d.linear_attn.out_proj.weight"
 #define SAFETENSORS_PATTERN_FFN_NORM_WEIGHT \
   "model.layers.%d.post_attention_layernorm.weight"
-#define SAFETENSORS_PATTERN_FFN_FC_WEIGHT "model.layers.%d.mlp.gate_proj.weight"
-#define SAFETENSORS_PATTERN_FFN_UP_WEIGHT "model.layers.%d.mlp.up_proj.weight"
+#define SAFETENSORS_PATTERN_FFN_FC_WEIGHT \
+  "model.layers.%d.mlp.gate_proj.weight"
+#define SAFETENSORS_PATTERN_FFN_UP_WEIGHT \
+  "model.layers.%d.mlp.up_proj.weight"
 #define SAFETENSORS_PATTERN_FFN_OUT_WEIGHT \
   "model.layers.%d.mlp.down_proj.weight"
-#define SAFETENSORS_PATTERN_OUT_NORM_WEIGHT "model.norm.weight"
-#define SAFETENSORS_PATTERN_OUT_WEIGHT      "lm_head.weight"
-
+#define SAFETENSORS_PATTERN_OUT_NORM_WEIGHT \
+  "model.norm.weight"
+#define SAFETENSORS_PATTERN_OUT_WEIGHT \
+  "lm_head.weight"
+// clang-format on
 #define SAFETENSORS_MAX_FILE_COUNT          64
 #define SAFETENSORS_MAX_DIM_COUNT           8
 #define SAFETENSORS_MAX_LAYER_COUNT         1024
@@ -99,7 +106,7 @@ typedef struct safetensors {
   bool rope_interleaved; // true: pairs interleaved (Meta), false: grouped (HF)
   size_t mrope_section_count; // Sections for multi-scale RoPE (0 if none)
   size_t mrope_section[SAFETENSORS_MAX_MROPE_SECTION_COUNT];
-  safetensors_layer_type_t layer_types[SAFETENSORS_MAX_LAYER_COUNT];
+  safetensors_layer_type_t layer_type[SAFETENSORS_MAX_LAYER_COUNT];
   size_t la_kernel_size;  // Linear attention convolution kernel size
   size_t la_k_head_dim;   // Linear attention key head dimension
   size_t la_k_head_count; // Linear attention key head count

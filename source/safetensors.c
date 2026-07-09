@@ -1,16 +1,12 @@
-#include "options.h"
 #include "safetensors.h"
+#include "options.h"
 #include "util.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-const char* safetensors_type_str[] = {
-  "F16",
-  "BF16",
-  "F32"
-};
+const char* safetensors_type_str[] = {"F16", "BF16", "F32"};
 
 // Allocate a safetensors_t structure
 safetensors_t* safetensors_malloc(void) {
@@ -19,7 +15,7 @@ safetensors_t* safetensors_malloc(void) {
     UTIL_DIE("failed to malloc for safetensors_t");
   }
   for (size_t i = 0; i < SAFETENSORS_MAX_LAYER_COUNT; i++) {
-    safetensors->layer_types[i] = SAFETENSORS_LAYER_TYPE_FA;
+    safetensors->layer_type[i] = SAFETENSORS_LAYER_TYPE_FA;
   }
   return safetensors;
 }
@@ -27,22 +23,16 @@ safetensors_t* safetensors_malloc(void) {
 static const char* safetensors_layer_type_string(
     safetensors_layer_type_t layer_type
 ) {
-  return layer_type == SAFETENSORS_LAYER_TYPE_LA
-      ? "LA"  // "linear_attention"
-      : "FA"; // "full_attention"
+  return layer_type == SAFETENSORS_LAYER_TYPE_LA ? "LA"  // "linear_attention"
+                                                 : "FA"; // "full_attention"
 }
 
 static void safetensors_print_layer_types(
-    FILE* f,
-    const safetensors_t* safetensors
+    FILE* f, const safetensors_t* safetensors
 ) {
   fprintf(f, "[");
   for (size_t i = 0; i < safetensors->layer_count; i++) {
-    fprintf(
-        f,
-        "%s",
-        safetensors_layer_type_string(safetensors->layer_types[i])
-    );
+    fprintf(f, "%s", safetensors_layer_type_string(safetensors->layer_type[i]));
     fprintf(f, i + 1 == safetensors->layer_count ? "]\n" : ", ");
   }
   if (safetensors->layer_count == 0) {
@@ -119,7 +109,7 @@ void safetensors_print(FILE* f, const safetensors_t* safetensors) {
       }
     }
   }
-  fprintf(f, "--- bos_token_id:   %d\n",  safetensors->bos_token_id);
+  fprintf(f, "--- bos_token_id:   %d\n", safetensors->bos_token_id);
   fprintf(f, "--- eos_token_id:   %d\n", safetensors->bos_token_id);
 
   fprintf(f, "- Files (%zu):\n", safetensors->file_count);
@@ -131,7 +121,7 @@ void safetensors_print(FILE* f, const safetensors_t* safetensors) {
   // Let's prepare to align the output
   size_t max_id_len = 0;
   size_t max_name_len = 0;
-  size_t max_type_len =  0;
+  size_t max_type_len = 0;
   size_t max_dim_len = 0;
   size_t max_size_len = 0;
   size_t max_file_len = 0;
@@ -222,7 +212,7 @@ void safetensors_print_model_infos(FILE* f, const safetensors_t* s) {
   size_t fa_layer_count = 0;
   size_t la_layer_count = 0;
   for (size_t i = 0; i < s->layer_count; i++) {
-    if (s->layer_types[i] == SAFETENSORS_LAYER_TYPE_LA) {
+    if (s->layer_type[i] == SAFETENSORS_LAYER_TYPE_LA) {
       la_layer_count++;
     } else {
       fa_layer_count++;
@@ -278,20 +268,16 @@ void safetensors_print_model_infos(FILE* f, const safetensors_t* s) {
   size_t mha_kv_len = fa_layer_count * s->kv_head_count * qkv_weight_dim;
   size_t mha_out_dim = s->q_head_count * s->head_dim;
   size_t mha_out_len = fa_layer_count * s->embedding_dim * mha_out_dim;
-  size_t la_qkv_dim =
-      2 * s->la_k_head_count * s->la_k_head_dim +
-      s->la_v_head_count * s->la_v_head_dim;
+  size_t la_qkv_dim = 2 * s->la_k_head_count * s->la_k_head_dim +
+                      s->la_v_head_count * s->la_v_head_dim;
   size_t la_v_dim = s->la_v_head_count * s->la_v_head_dim;
   size_t la_qkv_len = la_layer_count * la_qkv_dim * s->embedding_dim;
   size_t la_gate_len = la_layer_count * la_v_dim * s->embedding_dim;
-  size_t la_alpha_len =
-      la_layer_count * s->la_v_head_count * s->embedding_dim;
-  size_t la_beta_len =
-      la_layer_count * s->la_v_head_count * s->embedding_dim;
+  size_t la_alpha_len = la_layer_count * s->la_v_head_count * s->embedding_dim;
+  size_t la_beta_len = la_layer_count * s->la_v_head_count * s->embedding_dim;
   size_t la_dt_len = la_layer_count * s->la_v_head_count;
   size_t la_decay_len = la_layer_count * s->la_v_head_count;
-  size_t la_conv_len =
-      la_layer_count * la_qkv_dim * s->la_kernel_size;
+  size_t la_conv_len = la_layer_count * la_qkv_dim * s->la_kernel_size;
   size_t la_norm_len = la_layer_count * s->la_v_head_dim;
   size_t la_out_len = la_layer_count * s->embedding_dim * la_v_dim;
   size_t ffn_norm_len = s->layer_count * s->embedding_dim;
@@ -329,8 +315,7 @@ void safetensors_print_model_infos(FILE* f, const safetensors_t* s) {
                     mha_k_gb + mha_v_gb + mha_out_gb + la_qkv_gb + la_gate_gb +
                     la_alpha_gb + la_beta_gb + la_dt_gb + la_decay_gb +
                     la_conv_gb + la_norm_gb + la_out_gb + ffn_norm_gb +
-                    ffn_fc_gb + ffn_up_gb + ffn_out_gb + out_norm_gb +
-                    out_gb;
+                    ffn_fc_gb + ffn_up_gb + ffn_out_gb + out_norm_gb + out_gb;
 
   double non_layer_gb = embedding_gb + out_norm_gb + out_gb;
   double per_layer_gb = (total_gb - non_layer_gb) / s->layer_count;
@@ -416,55 +401,79 @@ void safetensors_print_model_infos(FILE* f, const safetensors_t* s) {
         f,
         "---    la_qkv (%7.4f GB) [la_layer_count=%zu][la_qkv_dim=%zu]"
         "[embedding_dim=%zu]\n",
-        la_qkv_gb, la_layer_count, la_qkv_dim, s->embedding_dim
+        la_qkv_gb,
+        la_layer_count,
+        la_qkv_dim,
+        s->embedding_dim
     );
     fprintf(
         f,
         "---   la_gate (%7.4f GB) [la_layer_count=%zu][la_v_dim=%zu]"
         "[embedding_dim=%zu]\n",
-        la_gate_gb, la_layer_count, la_v_dim, s->embedding_dim
+        la_gate_gb,
+        la_layer_count,
+        la_v_dim,
+        s->embedding_dim
     );
     fprintf(
         f,
         "---  la_alpha (%7.4f GB) [la_layer_count=%zu][la_v_head_count=%zu]"
         "[embedding_dim=%zu]\n",
-        la_alpha_gb, la_layer_count, s->la_v_head_count, s->embedding_dim
+        la_alpha_gb,
+        la_layer_count,
+        s->la_v_head_count,
+        s->embedding_dim
     );
     fprintf(
         f,
         "---   la_beta (%7.4f GB) [la_layer_count=%zu][la_v_head_count=%zu]"
         "[embedding_dim=%zu]\n",
-        la_beta_gb, la_layer_count, s->la_v_head_count, s->embedding_dim
+        la_beta_gb,
+        la_layer_count,
+        s->la_v_head_count,
+        s->embedding_dim
     );
     fprintf(
         f,
         "---     la_dt (%7.4f GB) [la_layer_count=%zu]"
         "[la_v_head_count=%zu]\n",
-        la_dt_gb, la_layer_count, s->la_v_head_count
+        la_dt_gb,
+        la_layer_count,
+        s->la_v_head_count
     );
     fprintf(
         f,
         "---  la_decay (%7.4f GB) [la_layer_count=%zu]"
         "[la_v_head_count=%zu] (FP32, -exp(A_log))\n",
-        la_decay_gb, la_layer_count, s->la_v_head_count
+        la_decay_gb,
+        la_layer_count,
+        s->la_v_head_count
     );
     fprintf(
         f,
         "---   la_conv (%7.4f GB) [la_layer_count=%zu][la_qkv_dim=%zu]"
         "[la_kernel_size=%zu]\n",
-        la_conv_gb, la_layer_count, la_qkv_dim, s->la_kernel_size
+        la_conv_gb,
+        la_layer_count,
+        la_qkv_dim,
+        s->la_kernel_size
     );
     fprintf(
         f,
         "---   la_norm (%7.4f GB) [la_layer_count=%zu]"
         "[la_v_head_dim=%zu] (FP32)\n",
-        la_norm_gb, la_layer_count, s->la_v_head_dim
+        la_norm_gb,
+        la_layer_count,
+        s->la_v_head_dim
     );
     fprintf(
         f,
         "---    la_out (%7.4f GB) [la_layer_count=%zu][embedding_dim=%zu]"
         "[la_v_dim=%zu]\n",
-        la_out_gb, la_layer_count, s->embedding_dim, la_v_dim
+        la_out_gb,
+        la_layer_count,
+        s->embedding_dim,
+        la_v_dim
     );
   }
   fprintf(
@@ -527,7 +536,7 @@ safetensors_t* safetensors_read(options_t* options) {
 }
 
 // Convert a string to a safetensors_type_t enum value
-safetensors_type_t safetensors_type_from_string(const char *s) {
+safetensors_type_t safetensors_type_from_string(const char* s) {
   if (!s) {
     UTIL_DIE("NULL string for safetensors_type_from_string");
   }

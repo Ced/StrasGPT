@@ -260,7 +260,7 @@ layer_type
         yyerror("too many layer types");
         YYABORT;
       }
-      parser_safetensors->layer_types[parser_layer_type] =
+      parser_safetensors->layer_type[parser_layer_type] =
           SAFETENSORS_LAYER_TYPE_FA;
       parser_layer_type++;
     }
@@ -270,7 +270,7 @@ layer_type
         yyerror("too many layer types");
         YYABORT;
       }
-      parser_safetensors->layer_types[parser_layer_type] =
+      parser_safetensors->layer_type[parser_layer_type] =
           SAFETENSORS_LAYER_TYPE_LA;
       parser_layer_type++;
     }

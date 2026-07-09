@@ -240,8 +240,8 @@ int main(int argc, char* argv[]) {
         generated_count++;
         if (predicted_token != tokenizer->eos_token_id) {
           predicted_string = tokenizer_decode(tokenizer, predicted_token);
-          // tokenizer_print_token_string(stdout, predicted_string);
-          fprintf(stdout, "%d ", predicted_token);
+          tokenizer_print_token_string(stdout, predicted_string);
+          // fprintf(stdout, "%d ", predicted_token);
         } else {
           // End of string token, stop generating (set loop exit condition)
           fprintf(stdout, "%s", TOKENIZER_STRING_TOKEN_EOS);

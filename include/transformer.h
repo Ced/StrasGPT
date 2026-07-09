@@ -32,9 +32,10 @@ typedef struct transformer_configuration {
   size_t mrope_section_count; // Number of multi-scale RoPE section (0 if none)
   size_t* mrope_section;      // Sections for multi-scale RoPE (NULL if none)
   size_t n_rot;               // Number of rotated dimensions per head (RoPE)
-  transformer_layer_type_t* layer_types; // [layer_count]
-  size_t fa_layer_count;                 // Number of full-attention layers
-  size_t la_layer_count;                 // Number of linear-attention layers
+  transformer_layer_type_t* layer_type; // [layer_count]
+  size_t* layer_compact_index;          // [layer_count]
+  size_t fa_layer_count;                // Number of full-attention layers
+  size_t la_layer_count;                // Number of linear-attention layers
   size_t la_kernel_size;   // Linear-attention convolution kernel size
   size_t la_k_head_dim;    // Linear-attention key head dimension
   size_t la_k_head_count;  // Linear-attention key head count

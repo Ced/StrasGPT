@@ -40,17 +40,17 @@ static transformer_configuration_t* configuration_from_safetensors(
     config->rope_pair_offset = safetensors->head_dim / 2;
     config->rope_pair_stride = 1;
   }
-  size_t sect_sum = 0;
+  size_t section_sum = 0;
   for (size_t i = 0; i < safetensors->mrope_section_count; i++) {
-    sect_sum += safetensors->mrope_section[i];
+    section_sum += safetensors->mrope_section[i];
   }
   if (safetensors->partial_rotary_factor > 0.0f) {
     // e.g. 0.25 * 256 = 64
     config->n_rot =
         (size_t)(safetensors->partial_rotary_factor * safetensors->head_dim +
                  0.5f);
-  } else if (sect_sum > 0) {
-    config->n_rot = 2 * sect_sum;          // fallback: derive from sections
+  } else if (section_sum > 0) {
+    config->n_rot = 2 * section_sum;       // fallback: derive from sections
   } else {
     config->n_rot = safetensors->head_dim; // fallback: rotate everything
   }
@@ -67,17 +67,27 @@ static transformer_configuration_t* configuration_from_safetensors(
   } else {
     config->mrope_section = NULL;
   }
-  size_t layer_types_size = config->layer_count * sizeof(*config->layer_types);
-  config->layer_types = malloc(layer_types_size);
-  if (config->layer_types == NULL) {
-    UTIL_DIE("failed to malloc for layer_types");
+  size_t layer_type_size = config->layer_count * sizeof(*config->layer_type);
+  config->layer_type = malloc(layer_type_size);
+  size_t layer_compact_index_size =
+      config->layer_count * sizeof(*config->layer_compact_index);
+  config->layer_compact_index = malloc(layer_compact_index_size);
+  if (config->layer_type == NULL) {
+    UTIL_DIE("failed to malloc for layer_type");
   }
+  if (config->layer_compact_index == NULL) {
+    UTIL_DIE("failed to malloc for layer_compact_index");
+  }
+  config->fa_layer_count = 0;
+  config->la_layer_count = 0;
   for (size_t i = 0; i < config->layer_count; i++) {
-    if (safetensors->layer_types[i] == SAFETENSORS_LAYER_TYPE_LA) {
-      config->layer_types[i] = TRANSFORMER_LAYER_TYPE_LA;
+    if (safetensors->layer_type[i] == SAFETENSORS_LAYER_TYPE_LA) {
+      config->layer_type[i] = TRANSFORMER_LAYER_TYPE_LA;
+      config->layer_compact_index[i] = config->la_layer_count;
       config->la_layer_count++;
     } else {
-      config->layer_types[i] = TRANSFORMER_LAYER_TYPE_FA;
+      config->layer_type[i] = TRANSFORMER_LAYER_TYPE_FA;
+      config->layer_compact_index[i] = config->fa_layer_count;
       config->fa_layer_count++;
     }
   }
@@ -92,20 +102,17 @@ static transformer_configuration_t* configuration_from_safetensors(
 }
 
 // Create a transformer_state_t structure from a safetensors_t
-static transformer_state_t* state_from_safetensors(safetensors_t* t) {
+static transformer_state_t* state_from_safetensors(
+    safetensors_t* t, transformer_configuration_t* c
+) {
   transformer_state_t* s = calloc(1, sizeof(*s));
   if (s == NULL) {
     UTIL_DIE("failed to malloc for transformer_state_t");
   }
 
-  // Linear-attention layer count (t only has layer_types[])
+  // Linear-attention layer count (t only has layer_type[])
   // !!!!! very stupid but fine for the moment !!!!!
-  size_t la_layer_count = 0;
-  for (size_t i = 0; i < t->layer_count; i++) {
-    if (t->layer_types[i] == SAFETENSORS_LAYER_TYPE_LA) {
-      la_layer_count++;
-    }
-  }
+  size_t la_layer_count = c->la_layer_count;
 
   size_t chunk_max_len = TRANSFORMER_CHUNK_MAX_LEN;
   size_t kv_dim = t->head_dim * t->kv_head_count;
@@ -117,6 +124,7 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   size_t cache_len = t->context_len * t->layer_count * kv_dim;
   size_t logits_len = chunk_max_len * t->vocabulary_len;
   size_t rope_len = t->context_len * t->head_dim;
+
   // for linear attention
   size_t la_qkv_dim = 2 * t->la_k_head_count * t->la_k_head_dim +
                       t->la_v_head_count * t->la_v_head_dim;
@@ -125,7 +133,6 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
       la_layer_count * la_qkv_dim * (t->la_kernel_size - 1);
   size_t la_ssm_state_len =
       la_layer_count * t->la_v_head_count * t->la_v_head_dim * t->la_k_head_dim;
-
   size_t embedding_size = embedding_len * sizeof(*s->embedding);
   size_t mha_norm_size = embedding_len * sizeof(*s->mha_norm);
   size_t mha_q_size = mha_q_len * sizeof(*s->mha_q);
@@ -140,8 +147,6 @@ static transformer_state_t* state_from_safetensors(safetensors_t* t) {
   size_t k_cache_size = cache_len * sizeof(*s->k_cache);
   size_t v_cache_size = cache_len * sizeof(*s->v_cache);
   size_t rope_cos_sin_size = rope_len * sizeof(*s->rope_cos_sin);
-  // for linear attention
-
   size_t la_conv_state_size = la_conv_state_len * sizeof(*s->la_conv_state);
   size_t la_ssm_state_size = la_ssm_state_len * sizeof(*s->la_ssm_state);
   size_t la_qkv_mixed_size = la_qkv_dim * sizeof(*s->la_qkv_mixed);
@@ -286,13 +291,13 @@ static size_t layer_type_index(
     safetensors_layer_type_t layer_type
 ) {
   if (layer >= safetensors->layer_count ||
-      safetensors->layer_types[layer] != layer_type) {
+      safetensors->layer_type[layer] != layer_type) {
     UTIL_DIE("tensor does not match configured layer type");
   }
 
   size_t index = 0;
   for (size_t i = 0; i < layer; i++) {
-    if (safetensors->layer_types[i] == layer_type) {
+    if (safetensors->layer_type[i] == layer_type) {
       index++;
     }
   }
@@ -1005,7 +1010,7 @@ static transformer_weights_t* weights_from_safetensors(safetensors_t* t) {
   size_t la_layer_count = 0;
   bool mha_output_gate = t->mha_output_gate;
   for (size_t i = 0; i < t->layer_count; i++) {
-    if (t->layer_types[i] == SAFETENSORS_LAYER_TYPE_LA) {
+    if (t->layer_type[i] == SAFETENSORS_LAYER_TYPE_LA) {
       la_layer_count++;
     } else {
       fa_layer_count++;
@@ -1143,7 +1148,7 @@ transformer_t* transformer_from_safetensors(safetensors_t* safetensors) {
   }
   t->config = configuration_from_safetensors(safetensors);
   t->weights = weights_from_safetensors(safetensors);
-  t->state = state_from_safetensors(safetensors);
+  t->state = state_from_safetensors(safetensors, t->config);
   return t;
 }
 
@@ -1208,7 +1213,8 @@ void transformer_free(transformer_t* transformer) {
   free(s);
 
   free(c->mrope_section);
-  free(c->layer_types);
+  free(c->layer_type);
+  free(c->layer_compact_index);
   free(c);
 
   free(transformer);
@@ -1226,15 +1232,8 @@ double transformer_layer_size_gb(
 
   transformer_configuration_t* c = transformer->config;
 
-  size_t fa_layer_count = 0;
-  size_t la_layer_count = 0;
-  for (size_t i = 0; i < n; i++) {
-    if (c->layer_types[i] == TRANSFORMER_LAYER_TYPE_LA) {
-      la_layer_count++;
-    } else {
-      fa_layer_count++;
-    }
-  }
+  size_t fa_layer_count = c->fa_layer_count;
+  size_t la_layer_count = c->la_layer_count;
 
   size_t mha_norm_len = n * c->embedding_dim;
   size_t mha_q_len =
@@ -1381,12 +1380,12 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
   fprintf(f, "--- head_dim:           %zu\n", c->head_dim);
   fprintf(f, "--- hidden_dim:         %zu\n", c->hidden_dim);
   fprintf(f, "--- layer_count:        %zu\n", c->layer_count);
-  fprintf(f, "--- layer_types:        [");
+  fprintf(f, "--- layer_type:        [");
   for (size_t i = 0; i < c->layer_count; i++) {
     fprintf(
         f,
         "%s%s",
-        c->layer_types[i] == TRANSFORMER_LAYER_TYPE_LA ? "LA" : "FA",
+        c->layer_type[i] == TRANSFORMER_LAYER_TYPE_LA ? "LA" : "FA",
         i + 1 == c->layer_count ? "]\n" : ", "
     );
   }
@@ -1542,7 +1541,8 @@ static void rmsnorm(
     y[j] = (x[j] * ss);
   }
   for (size_t j = 0; j < embedding_dim; j++) {
-    // Qwen3.5 adds 1 to each value of the weight using a one_offset
+    // Qwen3.5 adds 1 to each value of the weight using an offset of one
+    // we chose this solution as it is more practical than adding while loading
     float g = util_bf16_to_f32(w[j]);
     y[j] *= one_offset ? (1.0f + g) : g;
   }
@@ -1560,12 +1560,13 @@ static void rmsnorm_gated(
     float gate[embedding_dim]
 ) {
   float ss = 0.0f;
-  for (size_t i = 0; i < embedding_dim; i++) {
-    ss += x[i] * x[i];
+  for (size_t j = 0; j < embedding_dim; j++) {
+    ss += x[j] * x[j];
   }
-  ss = 1.0f / sqrtf(ss / embedding_dim + epsilon);
-  for (size_t i = 0; i < embedding_dim; i++) {
-    y[i] = (x[i] * ss) * w[i] * silu(gate[i]);
+  ss /= embedding_dim;
+  ss = (float)(1. / sqrtf(ss + epsilon));
+  for (size_t j = 0; j < embedding_dim; j++) {
+    y[j] = (x[j] * ss) * w[j] * silu(gate[j]);
   }
 }
 
@@ -1868,7 +1869,8 @@ static void transformer_predict_chunk(
     size_t vocabulary_len,
     size_t context_len,
     size_t layer_count,
-    transformer_layer_type_t layer_types[restrict layer_count],
+    transformer_layer_type_t layer_type[restrict layer_count],
+    size_t* layer_compact_index,
     size_t fa_layer_count,
     size_t la_layer_count,
     size_t q_head_count,
@@ -1957,27 +1959,11 @@ static void transformer_predict_chunk(
     size_t logits_count,
     float logits[restrict TRANSFORMER_CHUNK_MAX_LEN][vocabulary_len]
 ) {
-  (void)q_head_count; // Unused except in debug mode
-  // (void)layer_types;
+  // Variables unused except in debug mode
+  (void)q_head_count;
   (void)fa_layer_count;
-  // (void)la_kernel_size;
-  // (void)la_k_head_dim;
-  // (void)la_k_head_count;
-  // (void)la_v_head_dim;
-  // (void)la_v_head_count;
-  // (void)la_qkv_dim;
   (void)mha_gate_weight;
-  // (void)mha_output_gate;
   (void)la_layer_count;
-  // (void)la_qkv_weight;
-  // (void)la_gate_weight;
-  // (void)la_alpha_weight;
-  // (void)la_beta_weight;
-  // (void)la_dt_bias;
-  // (void)la_decay_weight;
-  // (void)la_conv_weight;
-  // (void)la_norm_weight;
-  // (void)la_out_weight;
 
   const bool use_imrope = mrope_section_count > 0 && mrope_section != NULL;
   size_t mrope_sections[4] = {0, 0, 0, 0};
@@ -1997,7 +1983,6 @@ static void transformer_predict_chunk(
   }
 
   // Execute decoder layers
-  size_t fa = 0, la = 0;
   for (size_t l = 0; l < layer_count; l++) {
 // Attention rmsnorm: normalize the embedding vectors for the current layer
 #pragma omp single
@@ -2012,7 +1997,8 @@ static void transformer_predict_chunk(
       );
     }
 
-    if (layer_types[l] == TRANSFORMER_LAYER_TYPE_FA) { // Full attention
+    if (layer_type[l] == TRANSFORMER_LAYER_TYPE_FA) { // Full attention
+      size_t fa = layer_compact_index[l];
       // K matmul for all KV-heads, storing in the k_cache
 #pragma omp for collapse(2) schedule(static) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
@@ -2197,9 +2183,9 @@ static void transformer_predict_chunk(
                   mha_out_weight[fa][e]);
         }
       }
-      fa++;
-    } else if (layer_types[l] == TRANSFORMER_LAYER_TYPE_LA) { // Linear
-                                                              // attention
+    } else if (layer_type[l] == TRANSFORMER_LAYER_TYPE_LA) { // Linear
+                                                             // attention
+      size_t la = layer_compact_index[l];
 #pragma omp single
       {
         const size_t conv_ring = la_kernel_size - 1;
@@ -2229,7 +2215,7 @@ static void transformer_predict_chunk(
                 la_decay_weight[la][h]
             );
           }
-          // 2) depthwise conv1d + SiLU, update ring
+          // 2) depthwise conv1d
           for (size_t c = 0; c < la_qkv_dim; c++) {
             float acc = 0.0f;
             for (size_t j = 0; j < conv_ring; j++) {
@@ -2238,7 +2224,14 @@ static void transformer_predict_chunk(
             }
             acc += util_bf16_to_f32(la_conv_weight[la][c][conv_ring]) *
                    la_qkv_mixed[c];
-            la_conv_out[c] = silu(acc);
+            la_conv_out[c] = acc;
+          }
+          // SiLU activation
+          for (size_t c = 0; c < la_qkv_dim; c++) {
+            la_conv_out[c] = silu(la_conv_out[c]);
+          }
+          // Update ring
+          for (size_t c = 0; c < la_qkv_dim; c++) {
             for (size_t j = 0; j + 1 < conv_ring; j++) {
               la_conv_state[la][c][j] = la_conv_state[la][c][j + 1];
             }
@@ -2307,7 +2300,6 @@ static void transformer_predict_chunk(
                 dot(la_v_dim, la_out_flat[0], la_out_weight[la][e][0]);
           }
         }
-        la++;
       }
 
     } else {
@@ -2434,7 +2426,7 @@ static void transformer_predict_chunk(
       fprintf(stderr, "Transformer state (activations) at layer %zu:\n", l);
       util_matrix_summary("- input emb", 1, mha_len, 3, (float*)input);
       util_matrix_summary("-  mha_norm", 1, mha_len, 3, (float*)mha_norm);
-      if (layer_types[l] == TRANSFORMER_LAYER_TYPE_LA) {
+      if (layer_type[l] == TRANSFORMER_LAYER_TYPE_LA) {
         util_matrix_summary(
             "- la_qkv_mix", 1, la_qkv_dim, 3, (float*)la_qkv_mixed
         );
@@ -2567,7 +2559,8 @@ void transformer_predict(
         vocabulary_len,
         context_len,
         layer_count,
-        c->layer_types,
+        c->layer_type,
+        c->layer_compact_index,
         c->fa_layer_count,
         c->la_layer_count,
         q_head_count,
