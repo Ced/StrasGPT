@@ -31,7 +31,18 @@ static transformer_configuration_t* configuration_from_safetensors(
   config->context_len = safetensors->context_len;
   config->epsilon = safetensors->epsilon;
   config->rope_theta = safetensors->rope_theta;
-  if (safetensors->rope_interleaved) {
+  if (safetensors->partial_rotary_factor > 0.0f) {
+    config->n_rot =
+        (size_t)(safetensors->partial_rotary_factor * safetensors->head_dim +
+                 0.5f);
+  } else {
+    config->n_rot = safetensors->head_dim;
+  }
+  if (config->n_rot < safetensors->head_dim) {
+    config->rope_pair_bound = config->n_rot / 2;
+    config->rope_pair_offset = config->n_rot / 2;
+    config->rope_pair_stride = 1;
+  } else if (safetensors->rope_interleaved) {
     config->rope_pair_bound = safetensors->head_dim;
     config->rope_pair_offset = 1;
     config->rope_pair_stride = 2;
@@ -39,33 +50,6 @@ static transformer_configuration_t* configuration_from_safetensors(
     config->rope_pair_bound = safetensors->head_dim / 2;
     config->rope_pair_offset = safetensors->head_dim / 2;
     config->rope_pair_stride = 1;
-  }
-  size_t section_sum = 0;
-  for (size_t i = 0; i < safetensors->mrope_section_count; i++) {
-    section_sum += safetensors->mrope_section[i];
-  }
-  if (safetensors->partial_rotary_factor > 0.0f) {
-    // e.g. 0.25 * 256 = 64
-    config->n_rot =
-        (size_t)(safetensors->partial_rotary_factor * safetensors->head_dim +
-                 0.5f);
-  } else if (section_sum > 0) {
-    config->n_rot = 2 * section_sum;       // fallback: derive from sections
-  } else {
-    config->n_rot = safetensors->head_dim; // fallback: rotate everything
-  }
-  config->mrope_section_count = safetensors->mrope_section_count;
-  if (config->mrope_section_count > 0) {
-    size_t size = config->mrope_section_count * sizeof(*config->mrope_section);
-    config->mrope_section = calloc(1, size);
-    if (config->mrope_section == NULL) {
-      UTIL_DIE("failed to malloc for mrope_section");
-    }
-    for (size_t i = 0; i < config->mrope_section_count; i++) {
-      config->mrope_section[i] = safetensors->mrope_section[i];
-    }
-  } else {
-    config->mrope_section = NULL;
   }
   size_t layer_type_size = config->layer_count * sizeof(*config->layer_type);
   config->layer_type = malloc(layer_type_size);
@@ -110,8 +94,6 @@ static transformer_state_t* state_from_safetensors(
     UTIL_DIE("failed to malloc for transformer_state_t");
   }
 
-  // Linear-attention layer count (t only has layer_type[])
-  // !!!!! very stupid but fine for the moment !!!!!
   size_t la_layer_count = c->la_layer_count;
 
   size_t chunk_max_len = TRANSFORMER_CHUNK_MAX_LEN;
@@ -199,26 +181,13 @@ static transformer_state_t* state_from_safetensors(
     memset(s->la_conv_state, 0, la_conv_state_size);
   if (la_ssm_state_size > 0)
     memset(s->la_ssm_state, 0, la_ssm_state_size);
-
-  // Initialize RoPE cosine and sine values
-  // Half-split RoPE layout configuration
-  size_t rope_pair_bound = t->head_dim / 2;
-  size_t rope_pair_offset = t->head_dim / 2;
-  size_t rope_pair_stride = 1;
-  float rope_coef = 2.0f;
-  // Interleaved RoPE layout configuration
-  if (t->rope_interleaved) {
-    rope_pair_bound = t->head_dim;
-    rope_pair_offset = 1;
-    rope_pair_stride = 2;
-    rope_coef = 1.0f;
-  }
-  for (size_t i = 0; i < t->context_len; i++) {
-    for (size_t j = 0; j < rope_pair_bound; j += rope_pair_stride) {
-      float freq = 1.0f / powf(t->rope_theta, (rope_coef * j) / t->head_dim);
+  float rope_coef = (c->rope_pair_stride == 1) ? 2.0f : 1.0f;
+  for (size_t i = 0; i < c->context_len; i++) {
+    for (size_t j = 0; j < c->rope_pair_bound; j += c->rope_pair_stride) {
+      float freq = 1.0f / powf(c->rope_theta, (rope_coef * j) / c->n_rot);
       float val = i * freq;
       s->rope_cos_sin[i * t->head_dim + j] = cosf(val);
-      s->rope_cos_sin[i * t->head_dim + j + rope_pair_offset] = sinf(val);
+      s->rope_cos_sin[i * t->head_dim + j + c->rope_pair_offset] = sinf(val);
     }
   }
 
@@ -1425,6 +1394,7 @@ void transformer_print(FILE* f, const transformer_t* transformer) {
       }
     }
   }
+  fprintf(f, "--- n_rot:              %zu\n", c->n_rot);
   char* aliased_out = c->aliased_out_weight ? "true" : "false";
   fprintf(f, "--- aliased_out_weight: %s\n", aliased_out);
 
@@ -1827,36 +1797,6 @@ static inline float dot(
 }
 #endif
 
-// Helper function allowing us to apply the correct RoPE according to our model.
-// Needed to assure support of different structures of transformers.
-static void rope_head_inplace(
-    float* x,
-    size_t head_dim,
-    size_t pos,
-    bool use_imrope,
-    size_t n_rot,
-    const size_t mrope_sections[4],
-    float rope_theta,
-    const float* rope_row,
-    size_t rope_pair_bound,
-    size_t rope_pair_offset,
-    size_t rope_pair_stride
-) {
-  if (use_imrope) { // Qwen3.5 uses IMRoPE
-    imrope(x, head_dim, n_rot, mrope_sections, pos, rope_theta);
-    return;
-  }
-  // Any other model uses normal RoPE
-  for (size_t h = 0; h < rope_pair_bound; h += rope_pair_stride) {
-    float fr = rope_row[h + 0];
-    float fi = rope_row[h + rope_pair_offset];
-    float v0 = x[h + 0];
-    float v1 = x[h + rope_pair_offset];
-    x[h + 0] = v0 * fr - v1 * fi;
-    x[h + rope_pair_offset] = v0 * fi + v1 * fr;
-  }
-}
-
 // Here is the compute function. Yep, LLMs are just that simple :)!
 // Execute the transformer model on a chunk of tokens, i.e. computes the
 // logits (unnormalized probability distribution) for the next token(s)
@@ -1890,10 +1830,6 @@ static void transformer_predict_chunk(
     size_t rope_pair_bound,
     size_t rope_pair_offset,
     size_t rope_pair_stride,
-    size_t mrope_section_count,
-    size_t* mrope_section,
-    size_t n_rot,
-    float rope_theta,
     float epsilon,
     // Weights
     uint16_t embedding_weight[restrict vocabulary_len][embedding_dim],
@@ -1965,13 +1901,6 @@ static void transformer_predict_chunk(
   (void)mha_gate_weight;
   (void)la_layer_count;
 
-  const bool use_imrope = mrope_section_count > 0 && mrope_section != NULL;
-  size_t mrope_sections[4] = {0, 0, 0, 0};
-  if (mrope_section_count > 0 && mrope_section != NULL) {
-    for (size_t i = 0; i < mrope_section_count && i < 4; i++) {
-      mrope_sections[i] = mrope_section[i];
-    }
-  }
 // Convert token ids to embedding vector representation
 #pragma omp single
   {
@@ -2042,19 +1971,15 @@ static void transformer_predict_chunk(
 #pragma omp for collapse(2) schedule(static) nowait
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t t = 0; t < token_count; t++) {
-          rope_head_inplace(
-              k_cache[l][k][cached_count + t],
-              head_dim,
-              cached_count + t,
-              use_imrope,
-              n_rot,
-              mrope_sections,
-              rope_theta,
-              rope_cos_sin[cached_count + t],
-              rope_pair_bound,
-              rope_pair_offset,
-              rope_pair_stride
-          );
+          for (size_t h = 0; h < rope_pair_bound; h += rope_pair_stride) {
+            float fr = rope_cos_sin[cached_count + t][h + 0];
+            float fi = rope_cos_sin[cached_count + t][h + rope_pair_offset];
+            float v0 = k_cache[l][k][cached_count + t][h + 0];
+            float v1 = k_cache[l][k][cached_count + t][h + rope_pair_offset];
+            k_cache[l][k][cached_count + t][h + 0] = v0 * fr - v1 * fi;
+            k_cache[l][k][cached_count + t][h + rope_pair_offset] =
+                v0 * fi + v1 * fr;
+          }
         }
       }
 
@@ -2097,19 +2022,14 @@ static void transformer_predict_chunk(
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
           for (size_t t = 0; t < token_count; t++) {
-            rope_head_inplace(
-                mha_q[k][q][t],
-                head_dim,
-                cached_count + t,
-                use_imrope,
-                n_rot,
-                mrope_sections,
-                rope_theta,
-                rope_cos_sin[cached_count + t],
-                rope_pair_bound,
-                rope_pair_offset,
-                rope_pair_stride
-            );
+            for (size_t h = 0; h < rope_pair_bound; h += rope_pair_stride) {
+              float fr = rope_cos_sin[cached_count + t][h + 0];
+              float fi = rope_cos_sin[cached_count + t][h + rope_pair_offset];
+              float v0 = mha_q[k][q][t][h + 0];
+              float v1 = mha_q[k][q][t][h + rope_pair_offset];
+              mha_q[k][q][t][h + 0] = v0 * fr - v1 * fi;
+              mha_q[k][q][t][h + rope_pair_offset] = v0 * fi + v1 * fr;
+            }
           }
         }
       }
@@ -2580,10 +2500,6 @@ void transformer_predict(
         c->rope_pair_bound,
         c->rope_pair_offset,
         c->rope_pair_stride,
-        c->mrope_section_count,
-        c->mrope_section,
-        c->n_rot,
-        c->rope_theta,
         c->epsilon,
 
         (uint16_t (*)[embedding_dim])w->embedding_weight,
