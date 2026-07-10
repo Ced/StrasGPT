@@ -241,6 +241,7 @@ int main(int argc, char* argv[]) {
         if (predicted_token != tokenizer->eos_token_id) {
           predicted_string = tokenizer_decode(tokenizer, predicted_token);
           tokenizer_print_token_string(stdout, predicted_string);
+          // If we want to dump token ids
           // fprintf(stdout, "%d ", predicted_token);
         } else {
           // End of string token, stop generating (set loop exit condition)

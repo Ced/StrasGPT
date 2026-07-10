@@ -1551,7 +1551,7 @@ static void rmsnorm_gated(
 //   (text-only inference: all streams use the same pos, so t/h/w/e collapse)
 //
 // Frequency per pair: θ_scale = rope_theta^(-2/n_rot), advanced each pair
-static void imrope(
+void imrope(
     float* x,
     size_t head_dim,
     size_t n_rot,
