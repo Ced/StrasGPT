@@ -423,9 +423,10 @@ char* format_instruction_prompt(char* prompt, char* model_type) {
         "<|im_start|>user\n%s<|im_end|>\n"
         "<|im_start|>assistant\n"
         "<think>\n";
-    formatted = malloc(strlen(template) + len + 1);
+    size_t size = strlen(template) + len + 1;
+    formatted = malloc(size);
     if (formatted) {
-      sprintf(formatted, template, prompt);
+      snprintf(formatted, size, template, prompt);
     }
   } else if (strstr(model_type, "Qwen") || strstr(model_type, "qwen")) {
     // Qwen
@@ -433,16 +434,18 @@ char* format_instruction_prompt(char* prompt, char* model_type) {
         "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n"
         "<|im_start|>user\n%s<|im_end|>\n"
         "<|im_start|>assistant";
-    formatted = malloc(strlen(template) + len + 1);
+    size_t size = strlen(template) + len + 1;
+    formatted = malloc(size);
     if (formatted) {
-      sprintf(formatted, template, prompt);
+      snprintf(formatted, size, template, prompt);
     }
   } else if (strstr(model_type, "Mistral") || strstr(model_type, "mistral")) {
     // Mistral
     const char* template = "<s>[INST] %s [/INST]";
-    formatted = malloc(strlen(template) + len + 1);
+    size_t size = strlen(template) + len + 1;
+    formatted = malloc(size);
     if (formatted) {
-      sprintf(formatted, template, prompt);
+      snprintf(formatted, size, template, prompt);
     }
   } else if (strstr(model_type, "Llama") || strstr(model_type, "llama")) {
     // Llama 3
@@ -451,9 +454,10 @@ char* format_instruction_prompt(char* prompt, char* model_type) {
         "You are a helpful assistant.\n<|eot_id|>\n"
         "<|start_header_id|>user<|end_header_id|>\n%s<|eot_id|>\n"
         "<|start_header_id|>assistant<|end_header_id|>";
-    formatted = malloc(strlen(template) + len + 1);
+    size_t size = strlen(template) + len + 1;
+    formatted = malloc(size);
     if (formatted) {
-      sprintf(formatted, template, prompt);
+      snprintf(formatted, size, template, prompt);
     }
   } else {
     // Unknown model type, return prompt as-is

@@ -2298,7 +2298,6 @@ static void transformer_predict_chunk(
 #pragma omp single
     if (l == 0 || l == layer_count - 1 || true) {
       size_t mha_len = token_count * embedding_dim;
-      size_t norm_len = embedding_dim;
       size_t q_len = q_head_count * token_count * head_dim;
       size_t kv_len = kv_head_count * token_count * head_dim;
       size_t att_len = token_count * q_head_count * head_dim;
