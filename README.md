@@ -4,14 +4,22 @@
   <img src="assets/llama_math-info.png" width="300" height="300" alt="Cute Llama">
 </p>
 
-This program is a direct C implementation of the Qwen3 / LLaMa 3.x / Mistral LLM transformer architecture, reusing the tokenizer and the sampler of Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) project and its fork by James Delancey [llama3.c](https://github.com/jameswdelancey/llama3.c) (we warmly thank you!). Given an input prompt, StrasGPT can generate a text that continues it. It was initially designed as a parallel programming project for master students in 2025 (students had to parallelize it with OpenMP + MPI). It is now getting continued for fun and (polyhedral) compiler research.
+This program is a direct C implementation of the Qwen 3.5 / Qwen3 / LLaMa 3.x / Mistral LLM transformer architecture, reusing the tokenizer and the sampler of Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) project and its fork by James Delancey [llama3.c](https://github.com/jameswdelancey/llama3.c) (we warmly thank you!). Given an input prompt, StrasGPT can generate a text that continues it, and it also supports basic instruct mode. It was initially designed as a parallel programming project for master students in 2025 (students had to parallelize it with OpenMP + MPI). It is now getting continued for fun and (polyhedral) compiler research.
 
 ## Get and compile StrasGPT
 
-You just need git, a C compiler and make.
+First, you need git, basic compiler tools and (optionally) parallel computing libraries to get and compile the tool. E.g., from a fresh Ubuntu distribution (3rd line is optional but recommended to compile the parallel, faster version):
 
 ```bash
-git clone git@gitlab.unistra.fr:bastoul/strasgpt.git
+sudo apt update
+sudo apt install git make clang bison flex
+sudo apt install libopenmpi-dev openmpi-bin openmpi-common
+```
+
+Then let's get and compile it:
+
+```bash
+git clone git@github.com:Ced/StrasGPT.git
 cd strasgpt
 make
 ```
@@ -40,6 +48,7 @@ git clone https://huggingface.co/Qwen/Qwen3-14B
 git clone https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct
 git clone https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
 git clone https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct
+git clone https://huggingface.co/Qwen/Qwen3.5-0.8B
 ```
 
 ## Run StrasGPT
