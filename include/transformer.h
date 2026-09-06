@@ -134,6 +134,16 @@ typedef struct transformer_state {
   float* ffn_up;    // [chunk_len][hidden_dim]
   float* ffn_out;   // [chunk_len][embedding_dim]
   float* logits;    // [chunk_len][vocabulary_len]
+  // MoE routing
+  float* ffn_router_logits;  // [chunk_len][expert_count]
+  size_t* ffn_router_index;  // [chunk_len][expert_per_token_count]
+  float* ffn_router_score;   // [chunk_len][expert_per_token_count]
+  // Selected expert activations
+  float* ffn_xp_gate; // [chunk_len][expert_per_token_count][hidden_dim]
+  float* ffn_xp_up;   // [chunk_len][expert_per_token_count][hidden_dim]
+  float* ffn_xp_fc;   // [chunk_len][expert_per_token_count][hidden_dim]
+  float* ffn_xp_out;  // [chunk_len][expert_per_token_count][embedding_dim]
+                      // Includes routing probabilities
   // KV-cache
   size_t cached_count; // Number of tokens currently cached
   float* k_cache;      // [layer_count][kv_head_count][context_len][head_dim]

@@ -178,6 +178,8 @@ static transformer_state_t* state_from_safetensors(
   size_t cache_len = t->context_len * t->layer_count * kv_dim;
   size_t logits_len = chunk_max_len * t->vocabulary_len;
   size_t rope_len = t->context_len * t->head_dim;
+  size_t router_len = chunk_max_len * t->expert_count;
+  size_t selected_len = chunk_max_len * t->expert_per_token_count;
 
   // for linear attention
   size_t la_qkv_dim = 2 * t->la_k_head_count * t->la_k_head_dim +
@@ -201,6 +203,11 @@ static transformer_state_t* state_from_safetensors(
   size_t k_cache_size = cache_len * sizeof(*s->k_cache);
   size_t v_cache_size = cache_len * sizeof(*s->v_cache);
   size_t rope_cos_sin_size = rope_len * sizeof(*s->rope_cos_sin);
+  size_t ffn_router_logits_size = router_len * sizeof(*s->ffn_router_logits);
+  size_t ffn_router_index_size = selected_len * sizeof(*s->ffn_router_index);
+  size_t ffn_router_score_size = selected_len * sizeof(*s->ffn_router_score);
+  size_t ffn_xp_hidden_size = selected_len * t->hidden_dim * sizeof(float);
+  size_t ffn_xp_out_size = selected_len * t->embedding_dim * sizeof(float);
   size_t la_conv_state_size = la_conv_state_len * sizeof(*s->la_conv_state);
   size_t la_ssm_state_size = la_ssm_state_len * sizeof(*s->la_ssm_state);
   size_t la_qkv_mixed_size = la_qkv_dim * sizeof(*s->la_qkv_mixed);
@@ -222,6 +229,25 @@ static transformer_state_t* state_from_safetensors(
   s->k_cache = aligned_alloc(UTIL_ALIGNMENT, k_cache_size);
   s->v_cache = aligned_alloc(UTIL_ALIGNMENT, v_cache_size);
   s->rope_cos_sin = aligned_alloc(UTIL_ALIGNMENT, rope_cos_sin_size);
+
+  if (t->expert_count > 0) {
+    s->ffn_router_logits =
+        aligned_alloc(UTIL_ALIGNMENT, ffn_router_logits_size);
+    s->ffn_router_index =
+        aligned_alloc(UTIL_ALIGNMENT, ffn_router_index_size);
+    s->ffn_router_score =
+        aligned_alloc(UTIL_ALIGNMENT, ffn_router_score_size);
+    if (!s->ffn_router_logits || !s->ffn_router_index || !s->ffn_router_score) {
+      UTIL_DIE("failed to malloc for routing");
+    }
+    s->ffn_xp_gate = aligned_alloc(UTIL_ALIGNMENT, ffn_xp_hidden_size);
+    s->ffn_xp_up = aligned_alloc(UTIL_ALIGNMENT, ffn_xp_hidden_size);
+    s->ffn_xp_fc = aligned_alloc(UTIL_ALIGNMENT, ffn_xp_hidden_size);
+    s->ffn_xp_out = aligned_alloc(UTIL_ALIGNMENT, ffn_xp_out_size);
+    if (!s->ffn_xp_gate || !s->ffn_xp_up || !s->ffn_xp_fc || !s->ffn_xp_out) {
+      UTIL_DIE("failed to malloc for expert activations");
+    }
+  }
 
   // for linear attention
   if (la_conv_state_size > 0)
@@ -1598,6 +1624,13 @@ void transformer_free(transformer_t* transformer) {
   free(s->ffn_fc);
   free(s->ffn_up);
   free(s->ffn_out);
+  free(s->ffn_router_logits);
+  free(s->ffn_router_index);
+  free(s->ffn_router_score);
+  free(s->ffn_xp_gate);
+  free(s->ffn_xp_up);
+  free(s->ffn_xp_fc);
+  free(s->ffn_xp_out);
   free(s->logits);
   free(s->k_cache);
   free(s->v_cache);
@@ -2451,6 +2484,26 @@ static inline float dot(
 }
 #endif
 
+// Dot-product with an MXFP4 weight row; len must be a multiple of 32.
+// Each block has 32 values packed into 16 bytes and one shared scale.
+float dot_mxfp4(
+    size_t len,
+    float activation[restrict len],
+    uint8_t block[restrict len / 32][16],
+    uint8_t scale[restrict len / 32]
+) {
+  float dot = 0.0f;
+  for (size_t b = 0; b < len / 32; b++) {
+    for (size_t i = 0; i < 32; i++) {
+      // Even values use the low nibble; odd values use the high nibble.
+      uint8_t w = block[b][i / 2] >> (4 * (i % 2));
+      float weight = util_mxfp4_to_f32(w, scale[b]);
+      dot += activation[b * 32 + i] * weight;
+    }
+  }
+  return dot;
+}
+
 // Here is the compute function. Yep, LLMs are just that simple :)!
 // Execute the transformer model on a chunk of tokens, i.e. computes the
 // logits (unnormalized probability distribution) for the next token(s)
@@ -2474,6 +2527,9 @@ static void transformer_predict_chunk(
     size_t embedding_dim,
     size_t head_dim,
     size_t hidden_dim,
+    size_t expert_count,
+    size_t expert_per_token_count,
+    float ffn_swiglu_limit,
     size_t la_kernel_size,
     size_t la_k_head_dim,
     size_t la_k_head_count,
@@ -2526,6 +2582,25 @@ static void transformer_predict_chunk(
     uint16_t ffn_fc_weight[restrict layer_count][hidden_dim][embedding_dim],
     uint16_t ffn_up_weight[restrict layer_count][hidden_dim][embedding_dim],
     uint16_t ffn_out_weight[restrict layer_count][embedding_dim][hidden_dim],
+    uint16_t ffn_router_weight[restrict layer_count][expert_count]
+                              [embedding_dim],
+    uint16_t ffn_router_bias[restrict layer_count][expert_count],
+    uint8_t ffn_xp_gate_block[restrict layer_count][expert_count][hidden_dim]
+                             [embedding_dim / 32][16],
+    uint8_t ffn_xp_up_block[restrict layer_count][expert_count][hidden_dim]
+                           [embedding_dim / 32][16],
+    uint8_t ffn_xp_down_block[restrict layer_count][expert_count][embedding_dim]
+                             [hidden_dim / 32][16],
+    uint8_t ffn_xp_gate_scale[restrict layer_count][expert_count][hidden_dim]
+                             [embedding_dim / 32],
+    uint8_t ffn_xp_up_scale[restrict layer_count][expert_count][hidden_dim]
+                           [embedding_dim / 32],
+    uint8_t ffn_xp_down_scale[restrict layer_count][expert_count][embedding_dim]
+                             [hidden_dim / 32],
+    uint16_t ffn_xp_gate_bias[restrict layer_count][expert_count][hidden_dim],
+    uint16_t ffn_xp_up_bias[restrict layer_count][expert_count][hidden_dim],
+    uint16_t ffn_xp_down_bias[restrict layer_count][expert_count]
+                            [embedding_dim],
     uint16_t out_norm_weight[restrict embedding_dim],
     uint16_t out_weight[restrict vocabulary_len][embedding_dim],
     // State
@@ -2542,6 +2617,19 @@ static void transformer_predict_chunk(
     float ffn_fc[restrict TRANSFORMER_CHUNK_MAX_LEN][hidden_dim],
     float ffn_up[restrict TRANSFORMER_CHUNK_MAX_LEN][hidden_dim],
     float ffn_out[restrict TRANSFORMER_CHUNK_MAX_LEN][embedding_dim],
+    float ffn_router_logits[restrict TRANSFORMER_CHUNK_MAX_LEN][expert_count],
+    size_t ffn_router_index[restrict TRANSFORMER_CHUNK_MAX_LEN]
+                           [expert_per_token_count],
+    float ffn_router_score[restrict TRANSFORMER_CHUNK_MAX_LEN]
+                          [expert_per_token_count],
+    float ffn_xp_gate[restrict TRANSFORMER_CHUNK_MAX_LEN]
+                     [expert_per_token_count][hidden_dim],
+    float ffn_xp_up[restrict TRANSFORMER_CHUNK_MAX_LEN]
+                   [expert_per_token_count][hidden_dim],
+    float ffn_xp_fc[restrict TRANSFORMER_CHUNK_MAX_LEN]
+                   [expert_per_token_count][hidden_dim],
+    float ffn_xp_out[restrict TRANSFORMER_CHUNK_MAX_LEN]
+                    [expert_per_token_count][embedding_dim],
     size_t cached_count,
     float k_cache[restrict layer_count][kv_head_count][context_len][head_dim],
     float v_cache[restrict layer_count][kv_head_count][context_len][head_dim],
@@ -2944,40 +3032,159 @@ static void transformer_predict_chunk(
       );
     }
 
+    if (expert_count == 0) { // Dense feed-forward network
 // Feed-forward's fully-connected matmul (a.k.a. gate)
 #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t h = 0; h < hidden_dim; h++) {
-        ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t h = 0; h < hidden_dim; h++) {
+          ffn_fc[t][h] = dot(embedding_dim, ffn_norm[t], ffn_fc_weight[l][h]);
+        }
       }
-    }
 
 // Feed-forward's up matmul
 #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t h = 0; h < hidden_dim; h++) {
-        ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t h = 0; h < hidden_dim; h++) {
+          ffn_up[t][h] = dot(embedding_dim, ffn_norm[t], ffn_up_weight[l][h]);
+        }
       }
-    }
 
 // SwiGLU non-linearity
 #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < hidden_dim; e++) {
-        // SiLU(x)=x*σ(x), where σ(x) is the logistic sigmoid
-        ffn_fc[t][e] *= (1.0f / (1.0f + expf(-ffn_fc[t][e])));
-        // Elementwise multiply with ffn_up_weight(x)
-        ffn_fc[t][e] *= ffn_up[t][e];
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t e = 0; e < hidden_dim; e++) {
+          // SiLU(x)=x*sigmoid(x)
+          ffn_fc[t][e] *= (1.0f / (1.0f + expf(-ffn_fc[t][e])));
+          // Elementwise multiply with ffn_up_weight(x)
+          ffn_fc[t][e] *= ffn_up[t][e];
+        }
       }
-    }
 
 #pragma omp barrier
 
 // Final matmul to get the output of the feed-forward network
 #pragma omp for collapse(2) schedule(static) nowait
-    for (size_t t = 0; t < token_count; t++) {
-      for (size_t e = 0; e < embedding_dim; e++) {
-        ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t e = 0; e < embedding_dim; e++) {
+          ffn_out[t][e] = dot(hidden_dim, ffn_fc[t], ffn_out_weight[l][e]);
+        }
+      }
+
+    } else { // Mixture of experts
+// Router logits, including the optional bias
+#pragma omp for collapse(2) schedule(static)
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t xp = 0; xp < expert_count; xp++) {
+          ffn_router_logits[t][xp] =
+              dot(embedding_dim, ffn_norm[t], ffn_router_weight[l][xp]);
+          if (ffn_router_bias) {
+            ffn_router_logits[t][xp] +=
+                util_bf16_to_f32(ffn_router_bias[l][xp]);
+          }
+        }
+      }
+
+// Select experts in descending score order, then normalize their scores
+#pragma omp for schedule(static)
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t xp = 0; xp < expert_count; xp++) {
+          float score = ffn_router_logits[t][xp];
+          size_t i = UTIL_MIN(xp, expert_per_token_count - 1);
+          if (xp >= expert_per_token_count && score <= ffn_router_score[t][i]) {
+            continue;
+          }
+          // Insert into the top scores; ties keep the lower expert index
+          while (i > 0 && score > ffn_router_score[t][i - 1]) {
+            ffn_router_score[t][i] = ffn_router_score[t][i - 1];
+            ffn_router_index[t][i] = ffn_router_index[t][i - 1];
+            i--;
+          }
+          ffn_router_score[t][i] = score;
+          ffn_router_index[t][i] = xp;
+        }
+        float max = ffn_router_score[t][0];
+        float sum = 0.0f;
+        for (size_t i = 0; i < expert_per_token_count; i++) {
+          ffn_router_score[t][i] = expf(ffn_router_score[t][i] - max);
+          sum += ffn_router_score[t][i];
+        }
+        for (size_t i = 0; i < expert_per_token_count; i++) {
+          ffn_router_score[t][i] /= sum;
+        }
+      }
+
+// Gate and up projections for the selected experts
+#pragma omp for collapse(3) schedule(static)
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t i = 0; i < expert_per_token_count; i++) {
+          for (size_t h = 0; h < hidden_dim; h++) {
+            size_t xp = ffn_router_index[t][i];
+            ffn_xp_gate[t][i][h] = dot_mxfp4(
+                embedding_dim, ffn_norm[t], ffn_xp_gate_block[l][xp][h],
+                ffn_xp_gate_scale[l][xp][h]
+            );
+            ffn_xp_up[t][i][h] = dot_mxfp4(
+                embedding_dim, ffn_norm[t], ffn_xp_up_block[l][xp][h],
+                ffn_xp_up_scale[l][xp][h]
+            );
+            if (ffn_xp_gate_bias) {
+              ffn_xp_gate[t][i][h] +=
+                  util_bf16_to_f32(ffn_xp_gate_bias[l][xp][h]);
+            }
+            if (ffn_xp_up_bias) {
+              ffn_xp_up[t][i][h] +=
+                  util_bf16_to_f32(ffn_xp_up_bias[l][xp][h]);
+            }
+          }
+        }
+      }
+
+// GPT-OSS SwiGLU: upper-only gate clipping, symmetric up clipping,
+// sigmoid slope 1.702, and an extra 1 added to the up projection
+#pragma omp for collapse(3) schedule(static)
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t i = 0; i < expert_per_token_count; i++) {
+          for (size_t h = 0; h < hidden_dim; h++) {
+            float gate = ffn_xp_gate[t][i][h];
+            float up = ffn_xp_up[t][i][h];
+            if (ffn_swiglu_limit > 0.0f) {
+              gate = fminf(gate, ffn_swiglu_limit);
+              up = fminf(fmaxf(up, -ffn_swiglu_limit), ffn_swiglu_limit);
+            }
+            ffn_xp_fc[t][i][h] =
+                gate * sigmoid(1.702f * gate) * (up + 1.0f);
+          }
+        }
+      }
+
+// Down projection: add the expert bias before applying its routing score
+#pragma omp for collapse(3) schedule(static)
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t i = 0; i < expert_per_token_count; i++) {
+          for (size_t e = 0; e < embedding_dim; e++) {
+            size_t xp = ffn_router_index[t][i];
+            ffn_xp_out[t][i][e] = dot_mxfp4(
+                hidden_dim, ffn_xp_fc[t][i], ffn_xp_down_block[l][xp][e],
+                ffn_xp_down_scale[l][xp][e]
+            );
+            if (ffn_xp_down_bias) {
+              ffn_xp_out[t][i][e] +=
+                  util_bf16_to_f32(ffn_xp_down_bias[l][xp][e]);
+            }
+            ffn_xp_out[t][i][e] *= ffn_router_score[t][i];
+          }
+        }
+      }
+
+// Sum experts in routing order, independently of the number of threads
+#pragma omp for collapse(2) schedule(static)
+      for (size_t t = 0; t < token_count; t++) {
+        for (size_t e = 0; e < embedding_dim; e++) {
+          ffn_out[t][e] = 0.0f;
+          for (size_t i = 0; i < expert_per_token_count; i++) {
+            ffn_out[t][e] += ffn_xp_out[t][i][e];
+          }
+        }
       }
     }
 
@@ -3055,8 +3262,17 @@ static void transformer_predict_chunk(
       }
       util_matrix_summary("-   mha_out", 1, mha_len, 3, (float*)mha_out);
       util_matrix_summary("-  ffn_norm", 1, mha_len, 3, (float*)ffn_norm);
-      util_matrix_summary("-    ffn_fc", 1, hidden_len, 3, (float*)ffn_fc);
-      util_matrix_summary("-    ffn_up", 1, hidden_len, 3, (float*)ffn_up);
+      if (expert_count == 0) {
+        util_matrix_summary("-    ffn_fc", 1, hidden_len, 3, (float*)ffn_fc);
+        util_matrix_summary("-    ffn_up", 1, hidden_len, 3, (float*)ffn_up);
+      } else {
+        size_t xp_len = hidden_len * expert_per_token_count;
+        size_t xp_out_len = mha_len * expert_per_token_count;
+        util_matrix_summary("-  xp_gate", 1, xp_len, 3, (float*)ffn_xp_gate);
+        util_matrix_summary("-    xp_up", 1, xp_len, 3, (float*)ffn_xp_up);
+        util_matrix_summary("-    xp_fc", 1, xp_len, 3, (float*)ffn_xp_fc);
+        util_matrix_summary("-   xp_out", 1, xp_out_len, 3, (float*)ffn_xp_out);
+      }
       util_matrix_summary("-   ffn_out", 1, mha_len, 3, (float*)ffn_out);
       util_matrix_summary("- final emb", 1, mha_len, 3, (float*)embedding);
 
@@ -3113,8 +3329,11 @@ void transformer_predict(
   transformer_weights_t* w = transformer->weights;
   transformer_state_t* s = transformer->state;
 
-  if (c->expert_count > 0) {
-    UTIL_DIE("MoE inference is not implemented yet");
+  if (c->expert_count > 0 &&
+      (!w->ffn_router_weight || !w->ffn_xp_gate_block ||
+       !w->ffn_xp_up_block || !w->ffn_xp_down_block ||
+       !w->ffn_xp_gate_scale || !w->ffn_xp_up_scale || !w->ffn_xp_down_scale)) {
+    UTIL_DIE("missing MoE router or packed expert weights");
   }
 
   if (token_count + s->cached_count > c->context_len) {
@@ -3188,6 +3407,9 @@ void transformer_predict(
         embedding_dim,
         head_dim,
         hidden_dim,
+        c->expert_count,
+        c->expert_per_token_count,
+        c->ffn_swiglu_limit,
         c->la_kernel_size,
         c->la_k_head_dim,
         c->la_k_head_count,
@@ -3234,6 +3456,23 @@ void transformer_predict(
         (uint16_t (*)[hidden_dim][embedding_dim])w->ffn_fc_weight,
         (uint16_t (*)[hidden_dim][embedding_dim])w->ffn_up_weight,
         (uint16_t (*)[embedding_dim][hidden_dim])w->ffn_out_weight,
+        (uint16_t (*)[c->expert_count][embedding_dim])w->ffn_router_weight,
+        (uint16_t (*)[c->expert_count])w->ffn_router_bias,
+        (uint8_t (*)[c->expert_count][hidden_dim][embedding_dim / 32][16])
+            w->ffn_xp_gate_block,
+        (uint8_t (*)[c->expert_count][hidden_dim][embedding_dim / 32][16])
+            w->ffn_xp_up_block,
+        (uint8_t (*)[c->expert_count][embedding_dim][hidden_dim / 32][16])
+            w->ffn_xp_down_block,
+        (uint8_t (*)[c->expert_count][hidden_dim][embedding_dim / 32])
+            w->ffn_xp_gate_scale,
+        (uint8_t (*)[c->expert_count][hidden_dim][embedding_dim / 32])
+            w->ffn_xp_up_scale,
+        (uint8_t (*)[c->expert_count][embedding_dim][hidden_dim / 32])
+            w->ffn_xp_down_scale,
+        (uint16_t (*)[c->expert_count][hidden_dim])w->ffn_xp_gate_bias,
+        (uint16_t (*)[c->expert_count][hidden_dim])w->ffn_xp_up_bias,
+        (uint16_t (*)[c->expert_count][embedding_dim])w->ffn_xp_down_bias,
         (uint16_t(*))w->out_norm_weight,
         (uint16_t (*)[embedding_dim])w->out_weight,
 
@@ -3250,6 +3489,13 @@ void transformer_predict(
         (float (*)[hidden_dim])s->ffn_fc,
         (float (*)[hidden_dim])s->ffn_up,
         (float (*)[embedding_dim])s->ffn_out,
+        (float (*)[c->expert_count])s->ffn_router_logits,
+        (size_t (*)[c->expert_per_token_count])s->ffn_router_index,
+        (float (*)[c->expert_per_token_count])s->ffn_router_score,
+        (float (*)[c->expert_per_token_count][hidden_dim])s->ffn_xp_gate,
+        (float (*)[c->expert_per_token_count][hidden_dim])s->ffn_xp_up,
+        (float (*)[c->expert_per_token_count][hidden_dim])s->ffn_xp_fc,
+        (float (*)[c->expert_per_token_count][embedding_dim])s->ffn_xp_out,
         s->cached_count,
         (float (*)[kv_head_count][context_len][head_dim])s->k_cache,
         (float (*)[kv_head_count][context_len][head_dim])s->v_cache,

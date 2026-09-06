@@ -1,6 +1,7 @@
 #ifndef UTIL_H
 # define UTIL_H
 
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -36,6 +37,44 @@ static inline float util_bf16_to_f32(uint16_t w) {
     float f;
   } u = {(uint32_t)w << 16};
   return u.f;
+}
+
+// Decode one MXFP4 value from the low four bits of w and its E8M0 scale.
+// A block stores 32 FP4 values in 16 bytes, sharing one scale byte. For
+// packed byte b, call with b for the first value and b >> 4 for the second.
+//
+// FP4 uses one sign bit, two exponent bits and one mantissa bit (E2M1).
+// The exponent bias is 1: normal magnitudes are (1 + mantissa/2) * 2^(e-1).
+// Exponent 0 instead represents 0 or 0.5; exponent 3 is finite, not Inf/NaN.
+// The table lists all 16 encodings, including positive and negative zero.
+//
+// E8M0 represents the power of two 2^(scale-127), with 255 reserved for NaN.
+// In particular, scale 0 means 2^-127, not zero. ldexpf applies this exponent
+// directly, including FP32 subnormal results and overflow to infinity.
+static inline float util_mxfp4_to_f32(uint8_t w, uint8_t scale) {
+  static const float value[16] = {
+      0.0f,
+      0.5f,
+      1.0f,
+      1.5f,
+      2.0f,
+      3.0f,
+      4.0f,
+      6.0f,
+      -0.0f,
+      -0.5f,
+      -1.0f,
+      -1.5f,
+      -2.0f,
+      -3.0f,
+      -4.0f,
+      -6.0f
+  };
+  if (scale == 255) {
+    return NAN;
+  }
+  // ldexpf(x, exp) "load exponent" returns x * 2^{exp}
+  return ldexpf(value[w & 0x0f], (int)scale - 127);
 }
 
 typedef enum {
