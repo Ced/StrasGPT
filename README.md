@@ -31,24 +31,26 @@ There are several other building targets:
 
 ## Get the model files
 
-You can use, e.g., Qwen3, LLaMa 3.x or Mistral checkpoints from HuggingFace. You will need to create an [HuggingFace Account](https://huggingface.co/), and get an access token (click on your profile icon, then "Access Tokens"). Finally you'll need to login then to download the desired models, e.g. here are some tested models:
+You can use, e.g., Qwen 3.5, GPT-OSS, LLaMa 3.x or Mistral checkpoints from HuggingFace. You will need to create an [HuggingFace Account](https://huggingface.co/), and get an access token (click on your profile icon, then "Access Tokens"). Finally you'll need to login then to download the desired models, e.g. here are some tested models:
 
 ```bash
 pip install 'huggingface_hub[cli]'
 huggingface-cli login
+git clone https://huggingface.co/openai/gpt-oss-20b
+git clone https://huggingface.co/Qwen/Qwen3.5-0.8B
+git clone https://huggingface.co/Qwen/Qwen3-0.6B
+git clone https://huggingface.co/Qwen/Qwen3-4B
+git clone https://huggingface.co/Qwen/Qwen3-14B
+git clone https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct
+git clone https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
+git clone https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct
+git clone https://huggingface.co/Qwen/Qwen2.5-0.5B
 git clone https://huggingface.co/meta-llama/Llama-3.2-1B
 git clone https://huggingface.co/meta-llama/Llama-3.2-3B
 git clone https://huggingface.co/meta-llama/Llama-3.1-8B
 git clone https://huggingface.co/mistralai/Mistral-Nemo-Base-2407
 git clone https://huggingface.co/mistralai/Ministral-8B-Instruct-2410
 git clone https://huggingface.co/mistralai/Mistral-Small-24B-Base-2501
-git clone https://huggingface.co/Qwen/Qwen3-0.6B
-git clone https://huggingface.co/Qwen/Qwen3-4B
-git clone https://huggingface.co/Qwen/Qwen3-14B
-git clone https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct
-git clone https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
-git clone https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct
-git clone https://huggingface.co/Qwen/Qwen3.5-0.8B
 ```
 
 ## Run StrasGPT
