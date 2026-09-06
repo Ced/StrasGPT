@@ -2506,6 +2506,8 @@ static void transformer_predict_chunk(
     uint16_t mha_k_bias[restrict fa_layer_count][kv_head_count][head_dim],
     uint16_t mha_v_bias[restrict fa_layer_count][kv_head_count][head_dim],
     uint16_t mha_out_bias[restrict fa_layer_count][embedding_dim],
+    uint16_t mha_sinks[restrict fa_layer_count][kv_head_count]
+                      [q_head_per_kv_head_count],
     uint16_t la_qkv_weight[restrict la_layer_count][la_qkv_dim][embedding_dim],
     uint16_t la_gate_weight[restrict la_layer_count][la_v_head_count]
                            [la_v_head_dim][embedding_dim],
@@ -2739,8 +2741,16 @@ static void transformer_predict_chunk(
             for (size_t s = start + 1; s < cached_count + t + 1; s++) {
               max = (mha_score[k][q][t][s] > max) ? mha_score[k][q][t][s] : max;
             }
-            // - Exp and sum
+            // - If the sink is present:
+            // --- It is included in the max values
+            // --- It contributes to the denominator, but has no value vector
             float sum = 0.0f;
+            if (mha_sinks) {
+              float sink = util_bf16_to_f32(mha_sinks[fa][k][q]);
+              max = (sink > max) ? sink : max;
+              sum = expf(sink - max);
+            }
+            // - Exp and sum
             for (size_t s = start; s < cached_count + t + 1; s++) {
               mha_score[k][q][t][s] = expf(mha_score[k][q][t][s] - max);
               sum += mha_score[k][q][t][s];
@@ -3208,6 +3218,7 @@ void transformer_predict(
         (uint16_t (*)[kv_head_count][head_dim])w->mha_k_bias,
         (uint16_t (*)[kv_head_count][head_dim])w->mha_v_bias,
         (uint16_t (*)[embedding_dim])w->mha_out_bias,
+        (uint16_t (*)[kv_head_count][q_head_per_kv_head_count])w->mha_sinks,
         (uint16_t (*)[la_qkv_dim][embedding_dim])w->la_qkv_weight,
         (uint16_t (*)[c->la_v_head_count][c->la_v_head_dim][embedding_dim])
             w->la_gate_weight,
