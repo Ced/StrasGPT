@@ -2496,6 +2496,11 @@ static void transformer_predict_chunk(
                          [embedding_dim],
     uint16_t mha_out_weight[restrict fa_layer_count][embedding_dim]
                            [q_head_count * head_dim],
+    uint16_t mha_q_bias[restrict fa_layer_count][kv_head_count]
+                       [q_head_per_kv_head_count][head_dim],
+    uint16_t mha_k_bias[restrict fa_layer_count][kv_head_count][head_dim],
+    uint16_t mha_v_bias[restrict fa_layer_count][kv_head_count][head_dim],
+    uint16_t mha_out_bias[restrict fa_layer_count][embedding_dim],
     uint16_t la_qkv_weight[restrict la_layer_count][la_qkv_dim][embedding_dim],
     uint16_t la_gate_weight[restrict la_layer_count][la_v_head_count]
                            [la_v_head_dim][embedding_dim],
@@ -2585,6 +2590,10 @@ static void transformer_predict_chunk(
           for (size_t h = 0; h < head_dim; h++) {
             k_cache[l][k][cached_count + t][h] =
                 dot(embedding_dim, mha_norm[t], mha_k_weight[fa][k][h]);
+            if (mha_k_bias) {
+              k_cache[l][k][cached_count + t][h] +=
+                  util_bf16_to_f32(mha_k_bias[fa][k][h]);
+            }
           }
         }
       }
@@ -2596,6 +2605,10 @@ static void transformer_predict_chunk(
           for (size_t h = 0; h < head_dim; h++) {
             v_cache[l][k][cached_count + t][h] =
                 dot(embedding_dim, mha_norm[t], mha_v_weight[fa][k][h]);
+            if (mha_v_bias) {
+              v_cache[l][k][cached_count + t][h] +=
+                  util_bf16_to_f32(mha_v_bias[fa][k][h]);
+            }
           }
         }
       }
@@ -2643,6 +2656,10 @@ static void transformer_predict_chunk(
             for (size_t h = 0; h < head_dim; h++) {
               mha_q[k][q][t][h] =
                   dot(embedding_dim, mha_norm[t], mha_q_weight[fa][k][q][h]);
+              if (mha_q_bias) {
+                mha_q[k][q][t][h] +=
+                    util_bf16_to_f32(mha_q_bias[fa][k][q][h]);
+              }
             }
           }
         }
@@ -2751,6 +2768,9 @@ static void transformer_predict_chunk(
               dot(q_head_count * head_dim,
                   ((float (*)[q_head_count * head_dim]) mha_att)[t],
                   mha_out_weight[fa][e]);
+          if (mha_out_bias) {
+            mha_out[t][e] += util_bf16_to_f32(mha_out_bias[fa][e]);
+          }
         }
       }
     } else if (layer_type[l] == TRANSFORMER_LAYER_TYPE_LA) { // Linear
@@ -3167,6 +3187,11 @@ void transformer_predict(
         (uint16_t (*)[kv_head_count][head_dim][embedding_dim])w->mha_v_weight,
         (uint16_t (*)[embedding_dim][q_head_count * head_dim])
             w->mha_out_weight,
+        (uint16_t (*)[kv_head_count][q_head_per_kv_head_count][head_dim])
+            w->mha_q_bias,
+        (uint16_t (*)[kv_head_count][head_dim])w->mha_k_bias,
+        (uint16_t (*)[kv_head_count][head_dim])w->mha_v_bias,
+        (uint16_t (*)[embedding_dim])w->mha_out_bias,
         (uint16_t (*)[la_qkv_dim][embedding_dim])w->la_qkv_weight,
         (uint16_t (*)[c->la_v_head_count][c->la_v_head_dim][embedding_dim])
             w->la_gate_weight,
