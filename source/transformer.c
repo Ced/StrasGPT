@@ -76,6 +76,10 @@ static transformer_configuration_t* configuration_from_safetensors(
   config->fa_layer_count = 0;
   config->la_layer_count = 0;
   for (size_t i = 0; i < config->layer_count; i++) {
+    if (safetensors->layer_type[i] == SAFETENSORS_LAYER_TYPE_SWA &&
+        config->swa_len == 0) {
+      UTIL_DIE("sliding attention requires a positive window length");
+    }
     if (safetensors->layer_type[i] == SAFETENSORS_LAYER_TYPE_LA) {
       config->layer_type[i] = TRANSFORMER_LAYER_TYPE_LA;
       config->layer_compact_index[i] = config->la_layer_count;
@@ -2458,6 +2462,7 @@ static void transformer_predict_chunk(
     // Configuration
     size_t vocabulary_len,
     size_t context_len,
+    size_t swa_len,
     size_t layer_count,
     transformer_layer_type_t layer_type[restrict layer_count],
     size_t* layer_compact_index,
@@ -2581,7 +2586,9 @@ static void transformer_predict_chunk(
       );
     }
 
-    if (layer_type[l] == TRANSFORMER_LAYER_TYPE_FA) { // Full attention
+    // Full and sliding window attention share projections and KV-cache.
+    if (layer_type[l] == TRANSFORMER_LAYER_TYPE_FA ||
+        layer_type[l] == TRANSFORMER_LAYER_TYPE_SWA) {
       size_t fa = layer_compact_index[l];
       // K matmul for all KV-heads, storing in the k_cache
 #pragma omp for collapse(2) schedule(static) nowait
@@ -2706,10 +2713,18 @@ static void transformer_predict_chunk(
       for (size_t k = 0; k < kv_head_count; k++) {
         for (size_t q = 0; q < q_head_per_kv_head_count; q++) {
           for (size_t t = 0; t < token_count; t++) {
-            // Calculate the attention score: QKˆT / sqrt(head_dim)
-            // Here we don't use mask but a triangular loop (no compute
-            // for future tokens)
-            for (size_t s = 0; s < cached_count + t + 1; s++) {
+            // Calculate the attention score: QK^T / sqrt(head_dim)
+            // - Lower bound: when sliding window attention is used,
+            //   we only compute the attention for the last swa_len tokens
+            size_t start = 0;
+            if (layer_type[l] == TRANSFORMER_LAYER_TYPE_SWA &&
+                cached_count + t + 1 > swa_len) {
+              start = cached_count + t + 1 - swa_len;
+            }
+            // - Upper bound: masked attention excludes future tokens,
+            //   here we don't use mask but a triangular loop
+            //   (no compute for future tokens)
+            for (size_t s = start; s < cached_count + t + 1; s++) {
               mha_score[k][q][t][s] = 0.0f;
               for (size_t h = 0; h < head_dim; h++) {
                 mha_score[k][q][t][s] +=
@@ -2720,18 +2735,18 @@ static void transformer_predict_chunk(
 
             // Softmax the scores to get attention weights
             // - Find max value (for numerical stability)
-            float max = mha_score[k][q][t][0];
-            for (size_t s = 1; s < cached_count + t + 1; s++) {
+            float max = mha_score[k][q][t][start];
+            for (size_t s = start + 1; s < cached_count + t + 1; s++) {
               max = (mha_score[k][q][t][s] > max) ? mha_score[k][q][t][s] : max;
             }
             // - Exp and sum
             float sum = 0.0f;
-            for (size_t s = 0; s < cached_count + t + 1; s++) {
+            for (size_t s = start; s < cached_count + t + 1; s++) {
               mha_score[k][q][t][s] = expf(mha_score[k][q][t][s] - max);
               sum += mha_score[k][q][t][s];
             }
             // - Normalize
-            for (size_t s = 0; s < cached_count + t + 1; s++) {
+            for (size_t s = start; s < cached_count + t + 1; s++) {
               mha_score[k][q][t][s] /= sum;
             }
 
@@ -2740,7 +2755,7 @@ static void transformer_predict_chunk(
             for (size_t h = 0; h < head_dim; h++) {
               mha_att[t][k][q][h] = 0.0f;
             }
-            for (size_t s = 0; s < cached_count + t + 1; s++) {
+            for (size_t s = start; s < cached_count + t + 1; s++) {
               for (size_t h = 0; h < head_dim; h++) {
                 mha_att[t][k][q][h] +=
                     mha_score[k][q][t][s] * v_cache[l][k][s][h];
@@ -3151,6 +3166,7 @@ void transformer_predict(
 
         vocabulary_len,
         context_len,
+        c->swa_len,
         layer_count,
         c->layer_type,
         c->layer_compact_index,
