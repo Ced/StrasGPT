@@ -99,6 +99,60 @@ static transformer_configuration_t* configuration_from_safetensors(
   return config;
 }
 
+// Precompute classic RoPE for interleaved or half-split pairs.
+static void rope_precompute(
+    const transformer_configuration_t* c, float* rope_cos_sin
+) {
+  float rope_coef = (c->rope_pair_stride == 1) ? 2.0f : 1.0f;
+  for (size_t i = 0; i < c->context_len; i++) {
+    for (size_t j = 0; j < c->rope_pair_bound; j += c->rope_pair_stride) {
+      float freq = 1.0f / powf(c->rope_theta, (rope_coef * j) / c->n_rot);
+      float val = i * freq;
+      rope_cos_sin[i * c->head_dim + j] = cosf(val);
+      rope_cos_sin[i * c->head_dim + j + c->rope_pair_offset] = sinf(val);
+    }
+  }
+}
+
+// Precompute YaRN frequencies and apply its amplitude to both cos and sin.
+// Correction bounds follow Hugging Face's _compute_yarn_parameters;
+// unrounded bounds match OpenAI's GPT-OSS RotaryEmbedding.
+static void yarn_precompute(
+    const transformer_configuration_t* c, float* rope_cos_sin
+) {
+  double low = c->n_rot *
+               log(c->rope_context_len / (c->rope_beta_fast * 2.0 * M_PI)) /
+               (2.0 * log(c->rope_theta));
+  double high = c->n_rot *
+                log(c->rope_context_len / (c->rope_beta_slow * 2.0 * M_PI)) /
+                (2.0 * log(c->rope_theta));
+  if (c->rope_yarn_truncate) {
+    low = floor(low);
+    high = ceil(high);
+  }
+  low = fmax(low, 0.0);
+  high = fmin(high, c->n_rot - 1.0);
+  if (low == high) {
+    high += 0.001;
+  }
+  float amplitude = 1.0 + 0.1 * log(c->rope_factor);
+  float rope_coef = (c->rope_pair_stride == 1) ? 2.0f : 1.0f;
+  for (size_t i = 0; i < c->context_len; i++) {
+    for (size_t j = 0; j < c->rope_pair_bound; j += c->rope_pair_stride) {
+      // The ramp uses the pair index, independently of the table layout.
+      float ramp = (j / c->rope_pair_stride - (float)low) / (float)(high - low);
+      float mask = 1.0f - fminf(fmaxf(ramp, 0.0f), 1.0f);
+      float freq = powf(c->rope_theta, (rope_coef * j) / c->n_rot);
+      float interpolation = 1.0f / (c->rope_factor * freq);
+      float extrapolation = 1.0f / freq;
+      float val = i * (interpolation * (1.0f - mask) + extrapolation * mask);
+      rope_cos_sin[i * c->head_dim + j] = cosf(val) * amplitude;
+      rope_cos_sin[i * c->head_dim + j + c->rope_pair_offset] =
+          sinf(val) * amplitude;
+    }
+  }
+}
+
 // Create a transformer_state_t structure from a safetensors_t
 static transformer_state_t* state_from_safetensors(
     safetensors_t* t, transformer_configuration_t* c
@@ -195,14 +249,10 @@ static transformer_state_t* state_from_safetensors(
     memset(s->la_conv_state, 0, la_conv_state_size);
   if (la_ssm_state_size > 0)
     memset(s->la_ssm_state, 0, la_ssm_state_size);
-  float rope_coef = (c->rope_pair_stride == 1) ? 2.0f : 1.0f;
-  for (size_t i = 0; i < c->context_len; i++) {
-    for (size_t j = 0; j < c->rope_pair_bound; j += c->rope_pair_stride) {
-      float freq = 1.0f / powf(c->rope_theta, (rope_coef * j) / c->n_rot);
-      float val = i * freq;
-      s->rope_cos_sin[i * t->head_dim + j] = cosf(val);
-      s->rope_cos_sin[i * t->head_dim + j + c->rope_pair_offset] = sinf(val);
-    }
+  if (c->rope_yarn) {
+    yarn_precompute(c, s->rope_cos_sin);
+  } else {
+    rope_precompute(c, s->rope_cos_sin);
   }
 
   return s;
