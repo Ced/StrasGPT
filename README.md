@@ -84,3 +84,35 @@ Token generation  (decode):    16 tokens in   0.213 s (79.207921 token/s)
 ```
 
 Actually not that bad!
+## Regression tests
+
+The small GPT-OSS/MoE regression test needs Python, NumPy, PyTorch and
+safetensors. Install these in your Python environment, then run:
+
+```bash
+python3 -m pip install numpy torch safetensors
+make test
+```
+
+Use `make test PYTHON=/path/to/python` to select another Python environment.
+The test generates temporary synthetic checkpoints; no download is needed.
+Test binaries are separate from the normal executable and build objects.
+
+`make test-parallel` additionally compares sequential and 10-thread execution
+(requires the same MPI/OpenMP tools as `make parallel`). `make test-asan`
+runs the regression with AddressSanitizer. All targets accept `PYTHON=...`.
+
+The test checks all MXFP4 codes/scales, including signed zero and NaN scales.
+Two tiny layers exercise attention biases, sinks, sliding windows and MoE
+routing, expert biases, clipping and weighted expert summation. It compares
+the last token's FFN intermediates at each layer and every token's final
+logits against an independent PyTorch FP32 reference. Cases include one or
+multiple selected experts, absent expert biases, disabled clipping, cached
+decoding and a sequence crossing the internal 512-token chunk boundary.
+
+Decoded weights and routing indices are checked exactly. Reference arithmetic
+uses `atol=3e-4, rtol=2e-4` for these small fixtures because FP32 reductions
+can round differently. Chunk sizes and thread counts must produce identical
+binary outputs. Failures report the first mismatching intermediate and index.
+These tests cover the MoE path with ordinary RoPE, not YaRN or native BF16
+reference execution.

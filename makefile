@@ -95,3 +95,41 @@ tsan: CC = mpicc
 tsan: CFLAGS = -fno-omit-frame-pointer -fsanitize=thread -O1 -g $(WFLAGS) -I$(INC_DIR) -DDEBUG=1 -DPARALLEL=1
 tsan: LDFLAGS = $(BREW_LIBOMP_LD_FLAGS) -fsanitize=thread -lm
 tsan: clean all
+
+# Self-contained MoE regression builds (do not reuse production objects).
+PYTHON ?= python3
+TEST_SRC = test/moe/moe.c source/util.c source/safetensors.c source/tokenizer.c
+TEST_GEN = $(BUILD_DIR)/y.tab.c $(BUILD_DIR)/lex.json_scanner_.c
+TEST_DEP = $(TEST_SRC) source/transformer.c $(wildcard include/*.h) $(TEST_GEN) \
+           makefile
+
+.PHONY: test test-parallel test-asan
+
+test: $(BUILD_DIR)/test-moe
+	$(PYTHON) test/moe/moe.py $(BUILD_DIR)/test-moe
+
+$(BUILD_DIR)/test-moe: $(TEST_DEP)
+	$(CC) $(OFLAGS) $(filter-out -Wextra,$(WFLAGS)) \
+	    -I$(INC_DIR) -c $(BUILD_DIR)/lex.json_scanner_.c -o $@-scanner.o
+	$(CC) $(OFLAGS) $(WFLAGS) -I$(INC_DIR) \
+	    $(TEST_SRC) $(BUILD_DIR)/y.tab.c $@-scanner.o -lm -o $@
+
+test-parallel: $(BUILD_DIR)/test-moe $(BUILD_DIR)/test-moe-parallel
+	$(PYTHON) test/moe/moe.py $(BUILD_DIR)/test-moe \
+	    --parallel $(BUILD_DIR)/test-moe-parallel
+
+$(BUILD_DIR)/test-moe-parallel: $(TEST_DEP)
+	mpicc $(OFLAGS) -fopenmp -DPARALLEL=1 $(filter-out -Wextra,$(WFLAGS)) \
+	    -I$(INC_DIR) -c $(BUILD_DIR)/lex.json_scanner_.c -o $@-scanner.o
+	mpicc $(OFLAGS) $(WFLAGS) -I$(INC_DIR) \
+	    -fopenmp -DPARALLEL=1 $(TEST_SRC) $(BUILD_DIR)/y.tab.c $@-scanner.o \
+	    $(filter-out -lomp,$(BREW_LIBOMP_LD_FLAGS)) -lm -o $@
+
+test-asan: $(BUILD_DIR)/test-moe-asan
+	$(PYTHON) test/moe/moe.py $(BUILD_DIR)/test-moe-asan
+
+$(BUILD_DIR)/test-moe-asan: $(TEST_DEP)
+	clang -O1 -g -fsanitize=address $(filter-out -Wextra,$(WFLAGS)) \
+	    -I$(INC_DIR) -c $(BUILD_DIR)/lex.json_scanner_.c -o $@-scanner.o
+	clang -O1 -g $(WFLAGS) -I$(INC_DIR) \
+	    -fsanitize=address $(TEST_SRC) $(BUILD_DIR)/y.tab.c $@-scanner.o -lm -o $@
