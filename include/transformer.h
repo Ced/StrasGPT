@@ -11,8 +11,9 @@ struct safetensors;
 #define TRANSFORMER_CHUNK_MAX_LEN 512
 
 typedef enum {
-  TRANSFORMER_LAYER_TYPE_FA, // Full attention
-  TRANSFORMER_LAYER_TYPE_LA, // Linear attention
+  TRANSFORMER_LAYER_TYPE_FA,  // Full attention
+  TRANSFORMER_LAYER_TYPE_LA,  // Linear attention
+  TRANSFORMER_LAYER_TYPE_SWA, // Sliding window attention
 } transformer_layer_type_t;
 
 typedef struct transformer_configuration {
@@ -24,8 +25,18 @@ typedef struct transformer_configuration {
   size_t kv_head_count;    // Number of key/value heads
   size_t vocabulary_len;   // Vocabulary size
   size_t context_len;      // Maximum sequence length
+  size_t swa_len;          // Sliding window attention window len (0 if unset)
+  size_t expert_count;     // Number of experts (0 for dense FFN)
+  size_t expert_per_token_count; // Selected experts per token (0 for dense)
+  float ffn_swiglu_limit;  // SwiGLU clipping limit (0 disables clipping)
   float epsilon;           // RMSNorm epsilon value
   float rope_theta;        // RoPE base frequency
+  bool rope_yarn;          // Enable YaRN frequency scaling
+  float rope_factor;       // Context extension factor
+  size_t rope_context_len; // Original RoPE context length (0 if unset)
+  float rope_beta_fast;    // YaRN extrapolation rotation threshold
+  float rope_beta_slow;    // YaRN interpolation rotation threshold
+  bool rope_yarn_truncate; // Round YaRN correction range boundaries
   size_t rope_pair_bound;  // Interleaved: head_dim, half-split: head_dim / 2
   size_t rope_pair_offset; // Interleaved: 1, half-split: head_dim / 2
   size_t rope_pair_stride; // Interleaved: 2, half-split: 1
@@ -34,7 +45,7 @@ typedef struct transformer_configuration {
   size_t n_rot;               // Number of rotated dimensions per head (RoPE)
   transformer_layer_type_t* layer_type; // [layer_count]
   size_t* layer_compact_index;          // [layer_count]
-  size_t fa_layer_count;                // Number of full-attention layers
+  size_t fa_layer_count;                // Full/sliding-attention layer count
   size_t la_layer_count;                // Number of linear-attention layers
   size_t la_kernel_size;   // Linear-attention convolution kernel size
   size_t la_k_head_dim;    // Linear-attention key head dimension
@@ -62,6 +73,11 @@ typedef struct transformer_weights {
                                //  head_dim][embedding_dim]
   uint16_t* mha_out_weight;    // [fa_layer_count][embedding_dim][
                                //  q_head_count * head_dim]
+  uint16_t* mha_q_bias;        // [fa_layer_count][q_head_count * head_dim]
+  uint16_t* mha_k_bias;        // [fa_layer_count][kv_head_count * head_dim]
+  uint16_t* mha_v_bias;        // [fa_layer_count][kv_head_count * head_dim]
+  uint16_t* mha_out_bias;      // [fa_layer_count][embedding_dim]
+  uint16_t* mha_sinks;         // [fa_layer_count][q_head_count]
   // - Linear attention
   uint16_t* la_qkv_weight;   // [la_layer_count][la_qkv_dim][embedding_dim]
   uint16_t* la_gate_weight;  // [la_layer_count][la_v_dim][embedding_dim]
@@ -77,6 +93,25 @@ typedef struct transformer_weights {
   uint16_t* ffn_fc_weight;   // [layer_count][embedding_dim][hidden_dim]
   uint16_t* ffn_up_weight;   // [layer_count][embedding_dim][hidden_dim]
   uint16_t* ffn_out_weight;  // [layer_count][hidden_dim][embedding_dim]
+  // Packed expert weights. Each byte stores two FP4 values.
+  uint8_t* ffn_xp_gate_block;  // [layer_count][expert_count][
+                               //  hidden_dim][embedding_dim/32][16]
+  uint8_t* ffn_xp_up_block;    // [layer_count][expert_count][
+                               //  hidden_dim][embedding_dim/32][16]
+  uint8_t* ffn_xp_down_block;  // [layer_count][expert_count][
+                               // embedding_dim][hidden_dim/32][16]
+  uint8_t* ffn_xp_gate_scale;  // [layer_count][expert_count][
+                               //  hidden_dim][embedding_dim/32]
+  uint8_t* ffn_xp_up_scale;    // [layer_count][expert_count][
+                               //  hidden_dim][embedding_dim/32]
+  uint8_t* ffn_xp_down_scale;  // [layer_count][expert_count][
+                               //  embedding_dim][hidden_dim/32]
+  uint16_t* ffn_router_weight; // [layer_count][expert_count][
+                               //  embedding_dim]
+  uint16_t* ffn_router_bias;   // [layer_count][expert_count]
+  uint16_t* ffn_xp_gate_bias;  // [layer_count][expert_count][hidden_dim]
+  uint16_t* ffn_xp_up_bias;    // [layer_count][expert_count][hidden_dim]
+  uint16_t* ffn_xp_down_bias;  // [layer_count][expert_count][embedding_dim]
   // Output parameter set
   uint16_t* out_norm_weight; // [embedding_dim]
   uint16_t* out_weight;      // [vocabulary_len][embedding_dim]

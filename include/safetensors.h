@@ -11,6 +11,7 @@ struct options;
 #define SAFETENSORS_FILE_INDEX               "model.safetensors.index.json"
 #define SAFETENSORS_FILE_SAFETENSORS         "model.safetensors"
 
+// clang-format off
 #define SAFETENSORS_PATTERN_EMBEDDING_WEIGHT "model.embed_tokens.weight"
 #define SAFETENSORS_PATTERN_MHA_NORM_WEIGHT \
   "model.layers.%d.input_layernorm.weight"
@@ -26,6 +27,16 @@ struct options;
   "model.layers.%d.self_attn.v_proj.weight"
 #define SAFETENSORS_PATTERN_MHA_OUT_WEIGHT \
   "model.layers.%d.self_attn.o_proj.weight"
+#define SAFETENSORS_PATTERN_MHA_Q_BIAS \
+  "model.layers.%d.self_attn.q_proj.bias"
+#define SAFETENSORS_PATTERN_MHA_K_BIAS \
+  "model.layers.%d.self_attn.k_proj.bias"
+#define SAFETENSORS_PATTERN_MHA_V_BIAS \
+  "model.layers.%d.self_attn.v_proj.bias"
+#define SAFETENSORS_PATTERN_MHA_OUT_BIAS \
+  "model.layers.%d.self_attn.o_proj.bias"
+#define SAFETENSORS_PATTERN_MHA_SINKS \
+  "model.layers.%d.self_attn.sinks"
 #define SAFETENSORS_PATTERN_LA_QKV_WEIGHT \
   "model.layers.%d.linear_attn.in_proj_qkv.weight"
 #define SAFETENSORS_PATTERN_LA_GATE_WEIGHT \
@@ -34,7 +45,6 @@ struct options;
   "model.layers.%d.linear_attn.in_proj_a.weight"
 #define SAFETENSORS_PATTERN_LA_BETA_WEIGHT \
   "model.layers.%d.linear_attn.in_proj_b.weight"
-// clang-format off
 #define SAFETENSORS_PATTERN_LA_DT_BIAS \
   "model.layers.%d.linear_attn.dt_bias"
 #define SAFETENSORS_PATTERN_LA_DECAY_WEIGHT \
@@ -53,6 +63,22 @@ struct options;
   "model.layers.%d.mlp.up_proj.weight"
 #define SAFETENSORS_PATTERN_FFN_OUT_WEIGHT \
   "model.layers.%d.mlp.down_proj.weight"
+#define SAFETENSORS_PATTERN_FFN_XP_GATE_UP_BLOCK \
+  "model.layers.%d.mlp.experts.gate_up_proj_blocks"
+#define SAFETENSORS_PATTERN_FFN_XP_DOWN_BLOCK \
+  "model.layers.%d.mlp.experts.down_proj_blocks"
+#define SAFETENSORS_PATTERN_FFN_XP_GATE_UP_SCALE \
+  "model.layers.%d.mlp.experts.gate_up_proj_scales"
+#define SAFETENSORS_PATTERN_FFN_XP_DOWN_SCALE \
+  "model.layers.%d.mlp.experts.down_proj_scales"
+#define SAFETENSORS_PATTERN_FFN_ROUTER_WEIGHT \
+  "model.layers.%d.mlp.router.weight"
+#define SAFETENSORS_PATTERN_FFN_ROUTER_BIAS \
+  "model.layers.%d.mlp.router.bias"
+#define SAFETENSORS_PATTERN_FFN_XP_GATE_UP_BIAS \
+  "model.layers.%d.mlp.experts.gate_up_proj_bias"
+#define SAFETENSORS_PATTERN_FFN_XP_DOWN_BIAS \
+  "model.layers.%d.mlp.experts.down_proj_bias"
 #define SAFETENSORS_PATTERN_OUT_NORM_WEIGHT \
   "model.norm.weight"
 #define SAFETENSORS_PATTERN_OUT_WEIGHT \
@@ -66,14 +92,18 @@ struct options;
 #define SAFETENSORS_MAX_STRING              1024
 
 typedef enum {
-  SAFETENSORS_LAYER_TYPE_FA, // Full attention
-  SAFETENSORS_LAYER_TYPE_LA, // Linear attention
+  SAFETENSORS_LAYER_TYPE_FA,  // Full attention
+  SAFETENSORS_LAYER_TYPE_LA,  // Linear attention
+  SAFETENSORS_LAYER_TYPE_SWA, // Sliding window attention
 } safetensors_layer_type_t;
 
 typedef enum {
-  SAFETENSORS_TYPE_F16,  // IEEE float16 (half precision)
-  SAFETENSORS_TYPE_BF16, // bfloat16 (truncated mantissa)
-  SAFETENSORS_TYPE_F32   // float
+  SAFETENSORS_TYPE_F16,   // IEEE float16 (half precision)
+  SAFETENSORS_TYPE_BF16,  // bfloat16 (truncated mantissa)
+  SAFETENSORS_TYPE_F32,   // float
+  SAFETENSORS_TYPE_U8,    // Unsigned byte
+  SAFETENSORS_TYPE_MXFP4, // Two FP4 values per byte; scales stored separately
+  SAFETENSORS_TYPE_E8M0   // Shared exponent scale byte
 } safetensors_type_t;
 
 extern const char* safetensors_type_str[];
@@ -99,10 +129,20 @@ typedef struct safetensors {
   size_t kv_head_count;  // Number of key/value heads
   size_t vocabulary_len; // Vocabulary size
   size_t context_len;    // Maximum sequence length
-  float epsilon;         // RMSNorm epsilon value
-  float rope_theta;      // RoPE base frequency
-  float partial_rotary_factor; // Fraction of head_dim that is rotated (0 if
-                               // unset)
+  size_t swa_len;        // Sliding window attention window length (0 if unset)
+  size_t expert_count;           // Number of experts (0 for dense FFN)
+  size_t expert_per_token_count; // Selected experts per token (0 for dense)
+  float ffn_swiglu_limit;  // SwiGLU clipping limit (0 disables clipping)
+  float epsilon;           // RMSNorm epsilon value
+  float rope_theta;        // RoPE base frequency
+  bool rope_yarn;          // Enable YaRN frequency scaling
+  float rope_factor;       // Context extension factor
+  size_t rope_context_len; // Original RoPE context length (0 if unset)
+  float rope_beta_fast;    // YaRN extrapolation rotation threshold
+  float rope_beta_slow;    // YaRN interpolation rotation threshold
+  bool rope_yarn_truncate; // Round YaRN correction range boundaries
+  float partial_rotary_factor; // Fraction of head_dim that is rotated
+                               // (0 if unset)
   bool rope_interleaved; // true: pairs interleaved (Meta), false: grouped (HF)
   size_t mrope_section_count; // Sections for multi-scale RoPE (0 if none)
   size_t mrope_section[SAFETENSORS_MAX_MROPE_SECTION_COUNT];
@@ -132,7 +172,9 @@ void safetensors_free(safetensors_t* safetensors);
 void safetensors_print(FILE* f, const safetensors_t* safetensors);
 void safetensors_print_model_infos(FILE* f, const safetensors_t* s);
 safetensors_t* safetensors_read(struct options* options);
-safetensors_type_t safetensors_type_from_string(const char* s);
+safetensors_type_t safetensors_type_from_string(
+    const char* s, const char* model_type, const char* tensor_name
+);
 void safetensors_file_lookup(safetensors_t* s, char* path, char* file);
 size_t safetensors_sizeof(safetensors_type_t type);
 bool safetensors_aliased_out_weight(const safetensors_t* safetensors);

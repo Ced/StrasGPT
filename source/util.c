@@ -126,7 +126,7 @@ void util_matrix_summary_bf16(
   double max = first;
   double sum = 0.0;
 
-  fprintf(stderr, "%9s: [", name ? name : "matrix");
+  fprintf(stderr, "%9s [", name ? name : "matrix");
   size_t i = 0;
   for (; i < sample_count && i < total; i++) {
     fprintf(stderr, " %6.3f", (double)util_bf16_to_f32(m[i]));
@@ -171,7 +171,7 @@ void util_matrix_summary_bf16(
     double min = (double)m[0]; \
     double max = (double)m[0]; \
     double sum = 0.0f; \
-    fprintf(stderr, "%6s: [", name ? name : "matrix"); \
+    fprintf(stderr, "%6s [", name ? name : "matrix"); \
     size_t i; \
     for (i = 0; i < sample_count && i < total; i++) { \
       fprintf(stderr, " %6.3f", (double)m[i]); \

@@ -2,6 +2,7 @@
   #include "safetensors.h"
   #include "tokenizer.h"
   #include "util.h"
+  #include <math.h>
   #include <stdio.h>
   #include <stdlib.h>
   #include <string.h>
@@ -31,7 +32,7 @@
   size_t parser_tensor = 0;
   size_t parser_dim = 0;
   size_t parser_file = 0;
-  size_t parser_layer_type = 0;
+  size_t parser_layer_count = 0;
   size_t parser_header_len = 0;
 %}
 
@@ -52,11 +53,14 @@
 %token BOS_TOKEN_ID EOS_TOKEN_ID
 %token EMBEDDING_DIM HEAD_DIM HIDDEN_DIM LAYER_COUNT MODEL_TYPE Q_HEAD_COUNT
 %token KV_HEAD_COUNT VOCABULARY_LEN CONTEXT_LEN MODEL VOCAB
+%token SWA_LEN EXPERT_COUNT EXPERT_PER_TOKEN_COUNT FFN_SWIGLU_LIMIT
+%token ROPE_TYPE ROPE_FACTOR ROPE_CONTEXT_LEN
+%token ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_YARN_TRUNCATE
 %token EPSILON ROPE_THETA ROPE_SCALING MROPE_INTERLEAVED MROPE_SECTION PARTIAL_ROTARY_FACTOR
 %token LAYER_TYPES LA_KERNEL_SIZE LA_K_HEAD_DIM LA_K_HEAD_COUNT
 %token LA_V_HEAD_DIM LA_V_HEAD_COUNT
 %token MHA_OUTPUT_GATE
-%token FULL_ATTENTION LINEAR_ATTENTION
+%token FULL_ATTENTION LINEAR_ATTENTION SLIDING_ATTENTION
 %token MODE_CONFIG MODE_INDEX MODE_SAFETENSORS MODE_TOKENIZER
 %start entry
 
@@ -211,6 +215,42 @@ config_member
       }
       parser_safetensors->vocabulary_len = $3.ival;
     }
+  | EXPERT_COUNT ':' NUMBER
+    {
+      if (!$3.is_int || $3.ival < 0) {
+        yyerror("invalid expert_count value");
+        YYABORT;
+      }
+      parser_safetensors->expert_count = $3.ival;
+    }
+  | EXPERT_PER_TOKEN_COUNT ':' NUMBER
+    {
+      if (!$3.is_int || $3.ival < 0) {
+        yyerror("invalid expert_per_token_count value");
+        YYABORT;
+      }
+      parser_safetensors->expert_per_token_count = $3.ival;
+    }
+  | FFN_SWIGLU_LIMIT ':' NUMBER
+    {
+      if (!isfinite((float)$3.fval) || $3.fval < 0) {
+        yyerror("invalid ffn_swiglu_limit value");
+        YYABORT;
+      }
+      parser_safetensors->ffn_swiglu_limit = $3.fval;
+    }
+  | SWA_LEN ':' NUMBER
+    {
+      if (!$3.is_int || $3.ival < 0) {
+        yyerror("invalid swa_len value");
+        YYABORT;
+      }
+      parser_safetensors->swa_len = $3.ival;
+    }
+  | SWA_LEN ':' NULL_
+    {
+      parser_safetensors->swa_len = 0;
+    }
   | CONTEXT_LEN ':' NUMBER
     {
       if (!$3.is_int) {
@@ -256,23 +296,33 @@ layer_type_list
 layer_type
   : FULL_ATTENTION
     {
-      if (parser_layer_type >= SAFETENSORS_MAX_LAYER_COUNT) {
-        yyerror("too many layer types");
+      if (parser_layer_count >= SAFETENSORS_MAX_LAYER_COUNT) {
+        yyerror("too many layers");
         YYABORT;
       }
-      parser_safetensors->layer_type[parser_layer_type] =
+      parser_safetensors->layer_type[parser_layer_count] =
           SAFETENSORS_LAYER_TYPE_FA;
-      parser_layer_type++;
+      parser_layer_count++;
     }
   | LINEAR_ATTENTION
     {
-      if (parser_layer_type >= SAFETENSORS_MAX_LAYER_COUNT) {
-        yyerror("too many layer types");
+      if (parser_layer_count >= SAFETENSORS_MAX_LAYER_COUNT) {
+        yyerror("too many layers");
         YYABORT;
       }
-      parser_safetensors->layer_type[parser_layer_type] =
+      parser_safetensors->layer_type[parser_layer_count] =
           SAFETENSORS_LAYER_TYPE_LA;
-      parser_layer_type++;
+      parser_layer_count++;
+    }
+  | SLIDING_ATTENTION
+    {
+      if (parser_layer_count >= SAFETENSORS_MAX_LAYER_COUNT) {
+        yyerror("too many layers");
+        YYABORT;
+      }
+      parser_safetensors->layer_type[parser_layer_count] =
+          SAFETENSORS_LAYER_TYPE_SWA;
+      parser_layer_count++;
     }
   ;
 
@@ -294,6 +344,47 @@ rope_scaling_member
   | PARTIAL_ROTARY_FACTOR ':' NUMBER
     {
       parser_safetensors->partial_rotary_factor = $3.fval;
+    }
+  | ROPE_TYPE ':' STRING
+    {
+      parser_safetensors->rope_yarn = strcmp($3, "yarn") == 0;
+      free($3);
+    }
+  | ROPE_CONTEXT_LEN ':' NUMBER
+    {
+      if (!$3.is_int || $3.ival < 0) {
+        yyerror("invalid rope_context_len value");
+        YYABORT;
+      }
+      parser_safetensors->rope_context_len = $3.ival;
+    }
+  | ROPE_YARN_TRUNCATE ':' BOOLEAN
+    {
+      parser_safetensors->rope_yarn_truncate = $3;
+    }
+  | ROPE_FACTOR ':' NUMBER
+    {
+      if (!isfinite((float)$3.fval) || $3.fval <= 0) {
+        yyerror("invalid rope_factor value");
+        YYABORT;
+      }
+      parser_safetensors->rope_factor = $3.fval;
+    }
+  | ROPE_BETA_FAST ':' NUMBER
+    {
+      if (!isfinite((float)$3.fval) || $3.fval <= 0) {
+        yyerror("invalid rope_beta_fast value");
+        YYABORT;
+      }
+      parser_safetensors->rope_beta_fast = $3.fval;
+    }
+  | ROPE_BETA_SLOW ':' NUMBER
+    {
+      if (!isfinite((float)$3.fval) || $3.fval <= 0) {
+        yyerror("invalid rope_beta_slow value");
+        YYABORT;
+      }
+      parser_safetensors->rope_beta_slow = $3.fval;
     }
   | STRING ':' json_value
     {
@@ -390,10 +481,10 @@ safetensors_member
         yyerror("too many tensors");
         YYABORT;
       }
+      parser_safetensors->tensor[parser_tensor].name = $1;
     }
     '{' safetensors_property_list '}'
     {
-      parser_safetensors->tensor[parser_tensor].name = $1;
       parser_safetensors->tensor_count++;
       parser_tensor++;
     }
@@ -408,7 +499,10 @@ safetensors_property
   : TYPE ':' STRING
     {
       parser_safetensors->tensor[parser_tensor].type =
-          safetensors_type_from_string($3);
+          safetensors_type_from_string(
+              $3, parser_safetensors->model_type,
+              parser_safetensors->tensor[parser_tensor].name
+          );
       free($3);
     }
   | SHAPE ':' safetensors_shape
@@ -618,7 +712,7 @@ int yylex(void) {
 safetensors_t* parser_parse_safetensors(const char* path) {
   char fullpath[SAFETENSORS_MAX_STRING];
   parser_safetensors = safetensors_malloc();
-  parser_layer_type = 0;
+  parser_layer_count = 0;
 
   // Let's parse the config file first
   #ifdef DEBUG
@@ -641,6 +735,23 @@ safetensors_t* parser_parse_safetensors(const char* path) {
   #ifdef DEBUG
   fprintf(stderr, "Done\n");
   #endif
+
+  // Dense FFNs have zero counts; MoE selects 1..expert_count experts.
+  size_t expert_count = parser_safetensors->expert_count;
+  size_t selected_count = parser_safetensors->expert_per_token_count;
+  if ((expert_count == 0 && selected_count != 0) ||
+      (expert_count > 0 &&
+       (selected_count == 0 || selected_count > expert_count))) {
+    UTIL_DIE("invalid expert_count / expert_per_token_count combination");
+  }
+
+  if (parser_safetensors->rope_yarn &&
+      (parser_safetensors->rope_factor < 1.0f ||
+       parser_safetensors->rope_context_len == 0 ||
+       parser_safetensors->rope_beta_fast <=
+           parser_safetensors->rope_beta_slow)) {
+    UTIL_DIE("invalid YaRN factor, context length or beta thresholds");
+  }
 
   // Then let's parse the index file, if any
   #ifdef DEBUG
