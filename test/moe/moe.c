@@ -5,7 +5,85 @@
 #include <omp.h>
 #endif
 
+static int check_dot_mxfp4(void) {
+  // Isolate every code at every position, including extreme scales.
+  float activation[32] = {0};
+  uint8_t block[1][16] = {{0}};
+  for (size_t s = 0; s < 256; s++) {
+    uint8_t scale[1] = {s};
+    for (size_t code = 0; code < 16; code++) {
+      float expected = util_mxfp4_to_f32(code, s);
+      for (size_t i = 0; i < 32; i++) {
+        activation[i] = 1.0f;
+        block[0][i / 2] = code << (4 * (i % 2));
+        float actual = dot_mxfp4(32, activation, block, scale);
+        if (!(isnan(expected) ? isnan(actual) : actual == expected)) {
+          fprintf(stderr, "MXFP4 dot: scale=%zu code=%zu position=%zu "
+                          "actual=%g expected=%g\n",
+                  s, code, i, actual, expected);
+          return 1;
+        }
+        activation[i] = 0.0f;
+        block[0][i / 2] = 0;
+      }
+    }
+  }
+
+  // Mixed signs/scales, cancellation, odd block counts and long rows.
+  size_t block_count[] = {1, 2, 3, 7, 90, 128, 513};
+  uint32_t random = 42;
+  for (size_t n = 0; n < sizeof(block_count) / sizeof(*block_count); n++) {
+    size_t len = block_count[n] * 32;
+    // Offset allocations to exercise loads without SIMD alignment.
+    float* storage = malloc((len + 1) * sizeof(float));
+    uint8_t* packed = malloc(len / 2 + 1);
+    uint8_t* scales = malloc(block_count[n] + 1);
+    if (!storage || !packed || !scales) UTIL_DIE("failed to malloc for test");
+    float* a = storage + 1;
+    uint8_t (*w)[16] = (uint8_t (*)[16])(packed + 1);
+    uint8_t* s = scales + 1;
+    for (size_t trial = 0; trial < 32; trial++) {
+      double expected = 0.0;
+      double magnitude = 0.0;
+      for (size_t b = 0; b < block_count[n]; b++) {
+        s[b] = 115 + (b + trial) % 24;
+        for (size_t i = 0; i < 16; i++) {
+          random = random * 1664525u + 1013904223u;
+          w[b][i] = random >> 24;
+        }
+        for (size_t i = 0; i < 32; i++) {
+          random = random * 1664525u + 1013904223u;
+          a[b * 32 + i] = ((int)(random >> 8) - 8388608) / 8388608.0f;
+          uint8_t code = w[b][i / 2] >> (4 * (i % 2));
+          double product = (double)a[b * 32 + i] *
+                           util_mxfp4_to_f32(code, s[b]);
+          expected += product;
+          magnitude += fabs(product);
+        }
+      }
+      float actual = dot_mxfp4(len, a, w, s);
+      if (!isfinite(actual) ||
+          fabs(actual - expected) > 2e-6 * magnitude + 1e-6) {
+        fprintf(stderr, "MXFP4 dot: len=%zu trial=%zu "
+                        "actual=%g expected=%g\n",
+                len, trial, actual, expected);
+        free(storage);
+        free(packed);
+        free(scales);
+        return 1;
+      }
+    }
+    free(storage);
+    free(packed);
+    free(scales);
+  }
+  return 0;
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && strcmp(argv[1], "dot") == 0) {
+    return check_dot_mxfp4();
+  }
   if (argc == 2 && strcmp(argv[1], "decode") == 0) {
     for (size_t scale = 0; scale < 256; scale++) {
       for (size_t code = 0; code < 16; code++) {

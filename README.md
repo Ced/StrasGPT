@@ -105,6 +105,8 @@ Test binaries are separate from the normal executable and build objects.
 runs the regression with AddressSanitizer. All targets accept `PYTHON=...`.
 
 The test checks all MXFP4 codes/scales, including signed zero and NaN scales.
+Dot-product checks cover every code at every block position and scale, plus
+mixed scales, cancellation, odd block counts, long rows and unaligned inputs.
 Two tiny layers exercise attention biases, sinks, sliding windows and MoE
 routing, expert biases, clipping and weighted expert summation. It compares
 the last token's FFN intermediates at each layer and every token's final

@@ -2486,6 +2486,140 @@ static inline float dot(
 
 // Dot-product with an MXFP4 weight row; len must be a multiple of 32.
 // Each block has 32 values packed into 16 bytes and one shared scale.
+#ifdef __ARM_NEON
+float dot_mxfp4(
+    size_t len,
+    float activation[restrict len],
+    uint8_t block[restrict len / 32][16],
+    uint8_t scale[restrict len / 32]
+) {
+  // Twice the FP4 values, so the lookup fits in one byte vector.
+  static const int8_t value[16] = {
+      0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
+  };
+  int8x16_t lookup = vld1q_s8(value);
+  uint8x8_t mask = vdup_n_u8(0x0f);
+  float32x4_t dot_0 = vdupq_n_f32(0.0);
+  float32x4_t dot_1 = vdupq_n_f32(0.0);
+  float32x4_t dot_2 = vdupq_n_f32(0.0);
+  float32x4_t dot_3 = vdupq_n_f32(0.0);
+
+  for (size_t b = 0; b < len / 32; b++) {
+    // Half the block scale, including subnormal and NaN scales.
+    float32x4_t factor = vdupq_n_f32(util_mxfp4_to_f32(1, scale[b]));
+    for (size_t i = 0; i < 32; i += 16) {
+      // Unpack 16 weights in even (low) / odd (high) nibble order.
+      uint8x8_t packed = vld1_u8(&block[b][i / 2]);
+      uint8x8_t lo = vand_u8(packed, mask);
+      uint8x8_t hi = vshr_n_u8(packed, 4);
+      uint8x8x2_t code = vzip_u8(lo, hi);
+      int8x16_t weight = vqtbl1q_s8(
+          lookup, vcombine_u8(code.val[0], code.val[1]));
+
+      // Sign-extend the small integers and convert to float32.
+      int16x8_t lo16 = vmovl_s8(vget_low_s8(weight));
+      int16x8_t hi16 = vmovl_s8(vget_high_s8(weight));
+      float32x4_t weight_0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo16)));
+      float32x4_t weight_1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo16)));
+      float32x4_t weight_2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi16)));
+      float32x4_t weight_3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi16)));
+      // Scale weights before multiplication, as in the scalar version.
+      weight_0 = vmulq_f32(weight_0, factor);
+      weight_1 = vmulq_f32(weight_1, factor);
+      weight_2 = vmulq_f32(weight_2, factor);
+      weight_3 = vmulq_f32(weight_3, factor);
+
+      float32x4_t activation_0 = vld1q_f32(&activation[b * 32 + i + 0]);
+      float32x4_t activation_1 = vld1q_f32(&activation[b * 32 + i + 4]);
+      float32x4_t activation_2 = vld1q_f32(&activation[b * 32 + i + 8]);
+      float32x4_t activation_3 = vld1q_f32(&activation[b * 32 + i + 12]);
+      dot_0 = vfmaq_f32(dot_0, activation_0, weight_0);
+      dot_1 = vfmaq_f32(dot_1, activation_1, weight_1);
+      dot_2 = vfmaq_f32(dot_2, activation_2, weight_2);
+      dot_3 = vfmaq_f32(dot_3, activation_3, weight_3);
+    }
+  }
+
+  // Do the final reduction.
+  dot_0 = vaddq_f32(dot_0, dot_1);
+  dot_2 = vaddq_f32(dot_2, dot_3);
+  dot_0 = vaddq_f32(dot_0, dot_2);
+  return vaddvq_f32(dot_0);
+}
+#elif defined __AVX2__
+float dot_mxfp4(
+    size_t len,
+    float activation[restrict len],
+    uint8_t block[restrict len / 32][16],
+    uint8_t scale[restrict len / 32]
+) {
+  // Twice the FP4 values, so the lookup fits in one byte vector.
+  static const int8_t value[16] = {
+      0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
+  };
+  __m128i lookup = _mm_loadu_si128((const __m128i*)value);
+  __m128i mask = _mm_set1_epi8(0x0f);
+  __m256 dot_0 = _mm256_setzero_ps();
+  __m256 dot_1 = _mm256_setzero_ps();
+  __m256 dot_2 = _mm256_setzero_ps();
+  __m256 dot_3 = _mm256_setzero_ps();
+
+  for (size_t b = 0; b < len / 32; b++) {
+    // Half the block scale, including subnormal and NaN scales.
+    __m256 factor = _mm256_set1_ps(util_mxfp4_to_f32(1, scale[b]));
+
+    // Unpack 32 weights in even (low) / odd (high) nibble order.
+    __m128i packed = _mm_loadu_si128((const __m128i*)block[b]);
+    __m128i lo = _mm_shuffle_epi8(lookup, _mm_and_si128(packed, mask));
+    __m128i hi = _mm_shuffle_epi8(
+        lookup, _mm_and_si128(_mm_srli_epi16(packed, 4), mask));
+    __m128i weight_lo = _mm_unpacklo_epi8(lo, hi);
+    __m128i weight_hi = _mm_unpackhi_epi8(lo, hi);
+
+    // Sign-extend the small integers and convert to float32.
+    __m256 weight_0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(weight_lo));
+    __m256 weight_1 = _mm256_cvtepi32_ps(
+        _mm256_cvtepi8_epi32(_mm_srli_si128(weight_lo, 8)));
+    __m256 weight_2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(weight_hi));
+    __m256 weight_3 = _mm256_cvtepi32_ps(
+        _mm256_cvtepi8_epi32(_mm_srli_si128(weight_hi, 8)));
+    // Scale weights before multiplication, as in the scalar version.
+    weight_0 = _mm256_mul_ps(weight_0, factor);
+    weight_1 = _mm256_mul_ps(weight_1, factor);
+    weight_2 = _mm256_mul_ps(weight_2, factor);
+    weight_3 = _mm256_mul_ps(weight_3, factor);
+
+    __m256 activation_0 = _mm256_loadu_ps(&activation[b * 32 + 0]);
+    __m256 activation_1 = _mm256_loadu_ps(&activation[b * 32 + 8]);
+    __m256 activation_2 = _mm256_loadu_ps(&activation[b * 32 + 16]);
+    __m256 activation_3 = _mm256_loadu_ps(&activation[b * 32 + 24]);
+#if defined(__FMA__)
+    dot_0 = _mm256_fmadd_ps(activation_0, weight_0, dot_0);
+    dot_1 = _mm256_fmadd_ps(activation_1, weight_1, dot_1);
+    dot_2 = _mm256_fmadd_ps(activation_2, weight_2, dot_2);
+    dot_3 = _mm256_fmadd_ps(activation_3, weight_3, dot_3);
+#else
+    dot_0 = _mm256_add_ps(dot_0, _mm256_mul_ps(activation_0, weight_0));
+    dot_1 = _mm256_add_ps(dot_1, _mm256_mul_ps(activation_1, weight_1));
+    dot_2 = _mm256_add_ps(dot_2, _mm256_mul_ps(activation_2, weight_2));
+    dot_3 = _mm256_add_ps(dot_3, _mm256_mul_ps(activation_3, weight_3));
+#endif
+  }
+
+  // Do the final reduction.
+  __m256 dot_01 = _mm256_add_ps(dot_0, dot_1);
+  __m256 dot_23 = _mm256_add_ps(dot_2, dot_3);
+  __m256 sum256 = _mm256_add_ps(dot_01, dot_23);
+  __m128 lo = _mm256_castps256_ps128(sum256);
+  __m128 hi = _mm256_extractf128_ps(sum256, 1);
+  __m128 sum128 = _mm_add_ps(lo, hi);
+  __m128 shuf = _mm_movehdup_ps(sum128);
+  __m128 sums = _mm_add_ps(sum128, shuf);
+  shuf = _mm_movehl_ps(shuf, sums);
+  sums = _mm_add_ss(sums, shuf);
+  return _mm_cvtss_f32(sums);
+}
+#else
 float dot_mxfp4(
     size_t len,
     float activation[restrict len],
@@ -2503,6 +2637,7 @@ float dot_mxfp4(
   }
   return dot;
 }
+#endif
 
 // Here is the compute function. Yep, LLMs are just that simple :)!
 // Execute the transformer model on a chunk of tokens, i.e. computes the

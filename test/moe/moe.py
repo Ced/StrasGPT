@@ -225,6 +225,9 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(1)
     check_decode(args.driver.resolve())
+    run(args.driver.resolve(), "dot")
+    if args.parallel:
+        run(args.parallel.resolve(), "dot")
     with tempfile.TemporaryDirectory(prefix="strasgpt-moe-") as directory:
         for experts, selected, bias, limit in [
                 (1, 1, True, 7), (3, 2, True, 7),
@@ -253,7 +256,7 @@ def main():
                             assert baseline == data, label + ": outputs differ"
                     print(f"PASS {path.name}, tokens={count}, "
                           f"layers={layer_count}", flush=True)
-    print("PASS MXFP4 decoding and MoE reference comparisons")
+    print("PASS MXFP4 decoding, dot products and MoE reference comparisons")
 
 
 if __name__ == "__main__":
