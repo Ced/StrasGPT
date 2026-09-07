@@ -3077,22 +3077,22 @@ static void transformer_predict_chunk(
               la_conv_state[la][c][conv_ring - 1] = la_qkv_mixed[c];
             }
           }
-          // 3–7) split q/k/v, norm, recurrence, gated norm, out proj
-          for (size_t h = 0; h < la_v_head_count; h++) {
-            size_t q_h = h;
-            size_t k_h = h;
-            if (la_k_head_count != la_v_head_count) {
-              q_h = h % la_k_head_count;
-              k_h = h % la_k_head_count;
-            }
-            float* q = la_conv_out + q_h * la_k_head_dim;
-            float* k = la_conv_out + k_offset + k_h * la_k_head_dim;
-            float* v = la_conv_out + v_offset + h * la_v_head_dim;
+          // Normalize each Q/K head once before sharing it across V heads.
+          for (size_t h = 0; h < la_k_head_count; h++) {
+            float* q = la_conv_out + h * la_k_head_dim;
+            float* k = la_conv_out + k_offset + h * la_k_head_dim;
             l2norm_head(la_k_head_dim, q, epsilon);
             l2norm_head(la_k_head_dim, k, epsilon);
             for (size_t i = 0; i < la_k_head_dim; i++) {
               q[i] *= q_scale;
             }
+          }
+          // Split q/k/v, recurrence, gated norm and output projection.
+          for (size_t h = 0; h < la_v_head_count; h++) {
+            size_t k_h = h / (la_v_head_count / la_k_head_count);
+            float* q = la_conv_out + k_h * la_k_head_dim;
+            float* k = la_conv_out + k_offset + k_h * la_k_head_dim;
+            float* v = la_conv_out + v_offset + h * la_v_head_dim;
 
             const float g_h = decay[h];
             const float b_h = beta[h];
