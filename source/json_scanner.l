@@ -8,6 +8,8 @@
   #include <string.h>
   size_t json_scanner_line_count = 1;
   void dump(char*, char*);
+  static bool tokenizer_mode = false;
+  static char* decode_json_string(const char* string);
 %}
 
 %option prefix="json_scanner_"
@@ -327,8 +329,15 @@ null              null
 
 <INITIAL,KW_AS_STRING>{string} {
   dump("string", yytext);
-  yylval.string = strdup(yytext + 1); // skip opening quote
-  yylval.string[strlen(yylval.string) - 1] = '\0'; // remove closing quote
+  if (tokenizer_mode && YY_START == INITIAL) {
+    if (!strcmp(yytext, "\"type\"")) return BPE_TYPE;
+    if (!strcmp(yytext, "\"merges\"")) return MERGES;
+    if (!strcmp(yytext, "\"added_tokens\"")) return ADDED_TOKENS;
+    if (!strcmp(yytext, "\"pre_tokenizer\"")) return PRE_TOKENIZER;
+    if (!strcmp(yytext, "\"normalizer\"")) return NORMALIZER;
+    if (!strcmp(yytext, "\"ignore_merges\"")) return IGNORE_MERGES;
+  }
+  yylval.string = decode_json_string(yytext);
   return STRING;
 }
 
@@ -348,7 +357,7 @@ null              null
   return yytext[0];
 }
 
-<INITIAL,KW_AS_STRING>[ \t] { }
+<INITIAL,KW_AS_STRING>[ \t\r] { }
 
 <INITIAL,KW_AS_STRING>[\n] {
   json_scanner_line_count++;
@@ -365,7 +374,9 @@ void dump(char* token, char* val) {
 }
 
 void json_scanner_reset(void) {
-  json_scanner_line_count = 0;
+  json_scanner_line_count = 1;
+  tokenizer_mode = false;
+  BEGIN(INITIAL);
 }
 
 void json_scanner_enter_kw_as_string_mode(void) {
@@ -374,4 +385,115 @@ void json_scanner_enter_kw_as_string_mode(void) {
 
 void json_scanner_leave_kw_as_string_mode(void) {
   BEGIN(INITIAL);
+}
+
+void json_scanner_enter_tokenizer_mode(void) {
+  tokenizer_mode = true;
+}
+
+static unsigned int json_hex(const char* string) {
+  unsigned int value = 0;
+  for (size_t i = 0; i < 4; i++) {
+    unsigned char c = string[i];
+    unsigned int digit;
+    if (c >= '0' && c <= '9') {
+      digit = c - '0';
+    } else if (c >= 'a' && c <= 'f') {
+      digit = c - 'a' + 10;
+    } else if (c >= 'A' && c <= 'F') {
+      digit = c - 'A' + 10;
+    } else {
+      UTIL_ERROR("invalid JSON Unicode escape");
+    }
+    value = 16 * value + digit;
+  }
+  return value;
+}
+
+// Unescape before interpreting ByteLevel's printable Unicode alphabet.
+static char* decode_json_string(const char* string) {
+  size_t len = strlen(string) - 1; // Position of closing quote
+  char* result = malloc(len + 1);
+  if (!result) {
+    UTIL_DIE("failed to malloc for JSON string");
+  }
+  size_t out = 0;
+  for (size_t i = 1; i < len; i++) {
+    unsigned char c = string[i];
+    if (c < 0x20) {
+      UTIL_ERROR("control character in JSON string");
+    }
+    if (c != '\\') {
+      result[out++] = c;
+      continue;
+    }
+    c = string[++i];
+    switch (c) {
+      case '"':
+      case '\\':
+      case '/':
+        result[out++] = c;
+        break;
+      case 'b':
+        result[out++] = '\b';
+        break;
+      case 'f':
+        result[out++] = '\f';
+        break;
+      case 'n':
+        result[out++] = '\n';
+        break;
+      case 'r':
+        result[out++] = '\r';
+        break;
+      case 't':
+        result[out++] = '\t';
+        break;
+      case 'u': {
+        if (i + 4 >= len) {
+          UTIL_ERROR("short JSON Unicode escape");
+        }
+        unsigned int cp = json_hex(string + i + 1);
+        i += 4;
+        if (cp >= 0xd800 && cp <= 0xdbff) {
+          if (i + 6 >= len || string[i + 1] != '\\' || string[i + 2] != 'u') {
+            UTIL_ERROR("missing JSON low surrogate");
+          }
+          unsigned int low = json_hex(string + i + 3);
+          if (low < 0xdc00 || low > 0xdfff) {
+            UTIL_ERROR("invalid JSON low surrogate");
+          }
+          cp = 0x10000 + ((cp - 0xd800) << 10) + low - 0xdc00;
+          i += 6;
+        } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+          UTIL_ERROR("unexpected JSON low surrogate");
+        }
+        // The parser uses C strings. ByteLevel encodes NUL as U+0100.
+        if (cp == 0) {
+          UTIL_ERROR("NUL in JSON string is unsupported");
+        }
+        if (cp < 0x80) {
+          result[out++] = cp;
+        } else {
+          if (cp >= 0x10000) {
+            result[out++] = 0xf0 | (cp >> 18);
+            result[out++] = 0x80 | ((cp >> 12) & 63);
+          } else if (cp >= 0x800) {
+            result[out++] = 0xe0 | (cp >> 12);
+          } else {
+            result[out++] = 0xc0 | (cp >> 6);
+          }
+          if (cp >= 0x800) {
+            result[out++] = 0x80 | ((cp >> 6) & 63);
+          }
+          result[out++] = 0x80 | (cp & 63);
+        }
+        break;
+      }
+      default:
+        UTIL_ERROR("invalid JSON escape");
+    }
+  }
+  result[out] = '\0';
+  return result;
 }

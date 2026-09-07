@@ -16,6 +16,8 @@ safetensors_t* safetensors_malloc(void) {
   if (!safetensors) {
     UTIL_DIE("failed to malloc for safetensors_t");
   }
+  safetensors->bos_token_id = -1;
+  safetensors->eos_token_id = -1;
   safetensors->swa_len = 0;
   safetensors->rope_yarn = false;
   safetensors->rope_factor = 1.0f;

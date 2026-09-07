@@ -11,6 +11,8 @@
   int json_scanner_lex(void);
   int json_scanner_restart(FILE*);
   void json_scanner_reset(void);
+  void json_scanner_enter_tokenizer_mode(void);
+  static void tokenizer_metadata_string(char* key, char* value);
   void json_scanner_enter_kw_as_string_mode(void);
   void json_scanner_leave_kw_as_string_mode(void);
   safetensors_t* parser_parse_safetensors(const char*);
@@ -34,6 +36,9 @@
   size_t parser_file = 0;
   size_t parser_layer_count = 0;
   size_t parser_header_len = 0;
+  int parser_metadata_mode;
+  int parser_added_id;
+  char* parser_added_string;
 %}
 
 %union {
@@ -61,6 +66,7 @@
 %token LA_V_HEAD_DIM LA_V_HEAD_COUNT
 %token MHA_OUTPUT_GATE
 %token FULL_ATTENTION LINEAR_ATTENTION SLIDING_ATTENTION
+%token BPE_TYPE MERGES ADDED_TOKENS PRE_TOKENIZER NORMALIZER IGNORE_MERGES
 %token MODE_CONFIG MODE_INDEX MODE_SAFETENSORS MODE_TOKENIZER
 %start entry
 
@@ -575,9 +581,30 @@ tokenizer_member_list
 
 tokenizer_member
   : MODEL ':' '{' tokenizer_model_member_list '}'
-  | STRING ':' json_value
+  | ADDED_TOKENS ':' '['
+    { json_scanner_enter_kw_as_string_mode(); }
+    tokenizer_added_list ']'
+    { json_scanner_leave_kw_as_string_mode(); }
+  | PRE_TOKENIZER ':'
+    {
+      parser_metadata_mode = 1;
+      json_scanner_enter_kw_as_string_mode();
+    }
+    tokenizer_metadata_value
+    { json_scanner_leave_kw_as_string_mode(); }
+  | NORMALIZER ':'
+    {
+      parser_metadata_mode = 2;
+      json_scanner_enter_kw_as_string_mode();
+    }
+    tokenizer_metadata_value
+    { json_scanner_leave_kw_as_string_mode(); }
+  | STRING ':'
+    { json_scanner_enter_kw_as_string_mode(); }
+    json_value
     {
       free($1);
+      json_scanner_leave_kw_as_string_mode();
     }
   ;
 
@@ -587,24 +614,23 @@ tokenizer_model_member_list
   ;
 
 tokenizer_model_member
-  : VOCAB ':' '{'
+  : BPE_TYPE ':' STRING
     {
-      // We enter special mode where keyword strings (e.g., "model" where
-      // Lex would return MODEL token) are considered as normal strings,
-      // to avoid issues if they are part of the model vocabulary
-      json_scanner_enter_kw_as_string_mode();
+      if (strcmp($3, "BPE")) UTIL_ERROR("expected a BPE tokenizer model");
+      free($3);
     }
-    tokenizer_vocab_member_list
-    {
-      // Back to normal mode
-      json_scanner_leave_kw_as_string_mode();
-    }
-    '}'
+  | VOCAB ':' '{'
+    { json_scanner_enter_kw_as_string_mode(); }
+    tokenizer_vocab_member_list '}'
+    { json_scanner_leave_kw_as_string_mode(); }
+  | MERGES ':' '['
+    { json_scanner_enter_kw_as_string_mode(); }
+    tokenizer_merge_list ']'
+    { json_scanner_leave_kw_as_string_mode(); }
+  | IGNORE_MERGES ':' BOOLEAN
+    { parser_tokenizer->ignore_merges = $3; }
   | STRING ':'
-    {
-      // See above
-      json_scanner_enter_kw_as_string_mode();
-    }
+    { json_scanner_enter_kw_as_string_mode(); }
     json_value
     {
       free($1);
@@ -620,15 +646,141 @@ tokenizer_vocab_member_list
 tokenizer_vocab_member
   : STRING ':' NUMBER
     {
-      size_t i = parser_tokenizer->token_string_count;
-      if (i >= TOKENIZER_MAX_TOKEN_STRING) {
-        yyerror("too many token strings");
+      if (!$3.is_int || $3.ival < 0 ||
+          $3.ival >= TOKENIZER_MAX_TOKEN_STRING) {
+        yyerror("invalid vocabulary token id");
         YYABORT;
       }
-      parser_tokenizer->token_string[i] = $1;
-      parser_tokenizer->score[i] = (float)$3.fval;
-      parser_tokenizer->token_string_count++;
+      tokenizer_add_token(parser_tokenizer, $1, (int)$3.ival, false);
     }
+  ;
+
+tokenizer_merge_list
+  : /* empty */
+  | tokenizer_merges
+  ;
+
+tokenizer_merges
+  : tokenizer_merges ',' tokenizer_merge
+  | tokenizer_merge
+  ;
+
+tokenizer_merge
+  : STRING { tokenizer_add_merge(parser_tokenizer, $1); }
+  | '[' STRING ',' STRING ']'
+    {
+      size_t size = strlen($2) + strlen($4) + 2;
+      char* pair = malloc(size);
+      if (!pair) UTIL_DIE("failed to malloc for merge pair");
+      snprintf(pair, size, "%s %s", $2, $4);
+      tokenizer_add_merge(parser_tokenizer, pair);
+      free($2);
+      free($4);
+    }
+  ;
+
+tokenizer_added_list
+  : /* empty */
+  | tokenizer_added_tokens
+  ;
+
+tokenizer_added_tokens
+  : tokenizer_added_tokens ',' tokenizer_added
+  | tokenizer_added
+  ;
+
+tokenizer_added
+  : '{'
+    {
+      parser_added_id = -1;
+      parser_added_string = NULL;
+    }
+    tokenizer_added_members '}'
+    {
+      if (parser_added_id < 0 || !parser_added_string) {
+        yyerror("incomplete added token");
+        YYABORT;
+      }
+      tokenizer_add_token(
+          parser_tokenizer, parser_added_string, parser_added_id, true
+      );
+    }
+  ;
+
+tokenizer_added_members
+  : tokenizer_added_members ',' tokenizer_added_member
+  | tokenizer_added_member
+  ;
+
+tokenizer_added_member
+  : STRING ':' STRING
+    {
+      if (!strcmp($1, "content")) {
+        free(parser_added_string);
+        parser_added_string = $3;
+      } else free($3);
+      free($1);
+    }
+  | STRING ':' NUMBER
+    {
+      if (!strcmp($1, "id")) {
+        if (!$3.is_int || $3.ival < 0 ||
+            $3.ival >= TOKENIZER_MAX_TOKEN_STRING) {
+          yyerror("invalid added token id");
+          YYABORT;
+        }
+        parser_added_id = (int)$3.ival;
+      }
+      free($1);
+    }
+  | STRING ':' BOOLEAN
+    {
+      if ($3 && (!strcmp($1, "single_word") || !strcmp($1, "lstrip") ||
+                 !strcmp($1, "rstrip") || !strcmp($1, "normalized"))) {
+        yyerror("unsupported added token matching option");
+        YYABORT;
+      }
+      free($1);
+    }
+  ;
+
+// Only retain the few pre-tokenizer/normalizer settings we implement.
+tokenizer_metadata_value
+  : STRING { free($1); }
+  | NUMBER
+  | BOOLEAN
+  | NULL_
+  | '{' tokenizer_metadata_members '}'
+  | '[' tokenizer_metadata_values ']'
+  ;
+
+tokenizer_metadata_values
+  : tokenizer_metadata_values ',' tokenizer_metadata_value
+  | tokenizer_metadata_value
+  | /* empty */
+  ;
+
+tokenizer_metadata_members
+  : tokenizer_metadata_members ',' tokenizer_metadata_member
+  | tokenizer_metadata_member
+  | /* empty */
+  ;
+
+tokenizer_metadata_member
+  : STRING ':' STRING { tokenizer_metadata_string($1, $3); }
+  | STRING ':' BOOLEAN
+    {
+      if ($3 && (!strcmp($1, "add_prefix_space") ||
+                 !strcmp($1, "use_regex") || !strcmp($1, "invert"))) {
+        yyerror("unsupported ByteLevel pre-tokenizer option");
+        YYABORT;
+      }
+      free($1);
+    }
+  | STRING ':' NUMBER { free($1); }
+  | STRING ':' NULL_ { free($1); }
+  | STRING ':' '{' tokenizer_metadata_members '}' { free($1); }
+  | STRING ':' '[' tokenizer_metadata_values ']' { free($1); }
   ;
 
 // +--------------------------------------------------------------------------+
@@ -841,6 +993,7 @@ tokenizer_t* parser_parse_tokenizer(const char* path) {
   }
   parser_mode = PARSER_MODE_TOKENIZER;
   json_scanner_reset();
+  json_scanner_enter_tokenizer_mode();
   json_scanner_restart(json_scanner_in);
   yyparse();
   fclose(json_scanner_in);
@@ -849,4 +1002,25 @@ tokenizer_t* parser_parse_tokenizer(const char* path) {
   #endif
 
   return parser_tokenizer;
+}
+
+static void tokenizer_metadata_string(char* key, char* value) {
+  if (parser_metadata_mode == 1) {
+    if (!strcmp(key, "Regex")) {
+      tokenizer_set_pattern(parser_tokenizer, value);
+      value = NULL;
+    } else if (!strcmp(key, "type")) {
+      if (!strcmp(value, "ByteLevel")) parser_tokenizer->byte_level = true;
+      else if (strcmp(value, "Sequence") && strcmp(value, "Split")) {
+        UTIL_ERROR("unsupported pre-tokenizer type");
+      }
+    } else if (!strcmp(key, "behavior") && strcmp(value, "Isolated")) {
+      UTIL_ERROR("unsupported pre-tokenizer split behavior");
+    }
+  } else if (!strcmp(key, "type")) {
+    if (strcmp(value, "NFC")) UTIL_ERROR("unsupported normalizer type");
+    parser_tokenizer->normalize = true;
+  }
+  free(key);
+  free(value);
 }

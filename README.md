@@ -86,13 +86,15 @@ Token generation  (decode):    16 tokens in   0.213 s (79.207921 token/s)
 ```
 
 Actually not that bad!
+
 ## Regression tests
 
-The small GPT-OSS/MoE regression test needs Python, NumPy, PyTorch and
-safetensors. Install these in your Python environment, then run:
+The regression tests need Python, NumPy, PyTorch, safetensors and the
+Hugging Face tokenizers package. Install these in your Python environment,
+then run:
 
 ```bash
-python3 -m pip install numpy torch safetensors
+python3 -m pip install numpy torch safetensors tokenizers
 make test
 ```
 
@@ -120,3 +122,23 @@ can round differently. Chunk sizes and thread counts must produce identical
 binary outputs. Failures report the first mismatching intermediate and index.
 These tests cover the MoE path with ordinary RoPE, not YaRN or native BF16
 reference execution.
+
+### Tokenizer tests
+
+`make test-tokenizer` runs small synthetic comparisons with Hugging Face without
+model downloads; `make test-tokenizer-asan` uses AddressSanitizer. These checks
+are also included in `make test`, `make test-parallel` and `make test-asan`.
+Python dependencies are needed only for testing.
+All targets accept `PYTHON=...`.
+
+The tests cover all five supported splitting patterns, shuffled token IDs and
+vocabulary order, both merge-list formats, JSON escapes, special tokens and all
+256 byte values on output. French cases include precomposed and decomposed
+common accents, ligatures, curly apostrophes and ordinary and narrow nonbreaking
+spaces.
+
+To additionally compare a local checkpoint's tokenizer:
+
+```bash
+make test-tokenizer TOKENIZER_MODELS=../model_zoo/Qwen3.5-0.8B
+```

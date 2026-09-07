@@ -298,11 +298,9 @@ size_t sampler_sample(sampler_t* sampler, float* logits, int token) {
           top[i].probability
       );
       if (sampler->tokenizer) {
-        fprintf(
-            stderr,
-            " text=\"%s\"",
-            tokenizer_decode(sampler->tokenizer, top[i].index)
-        );
+        fprintf(stderr, " text=\"");
+        tokenizer_print_token(stderr, sampler->tokenizer, top[i].index);
+        fprintf(stderr, "\"");
       }
       fprintf(stderr, "\n");
     }

@@ -133,3 +133,34 @@ $(BUILD_DIR)/test-moe-asan: $(TEST_DEP)
 	    -I$(INC_DIR) -c $(BUILD_DIR)/lex.json_scanner_.c -o $@-scanner.o
 	clang -O1 -g $(WFLAGS) -I$(INC_DIR) \
 	    -fsanitize=address $(TEST_SRC) $(BUILD_DIR)/y.tab.c $@-scanner.o -lm -o $@
+
+# ByteLevel tokenizer reference tests. Python dependencies are test-only.
+TOKENIZER_TEST_SRC = test/tokenizer/tokenizer.c source/tokenizer.c \
+                     source/safetensors.c source/util.c
+TOKENIZER_TEST_DEP = $(TOKENIZER_TEST_SRC) $(wildcard include/*.h) \
+                     $(TEST_GEN) makefile
+TOKENIZER_MODELS ?=
+
+.PHONY: test-tokenizer test-tokenizer-asan
+
+test: test-tokenizer
+test-parallel: test-tokenizer
+test-asan: test-tokenizer-asan
+
+test-tokenizer: $(BUILD_DIR)/test-tokenizer
+	$(PYTHON) test/tokenizer/tokenizer.py $< $(TOKENIZER_MODELS)
+
+$(BUILD_DIR)/test-tokenizer: $(TOKENIZER_TEST_DEP)
+	$(CC) $(OFLAGS) $(filter-out -Wextra,$(WFLAGS)) \
+	    -I$(INC_DIR) -c $(BUILD_DIR)/lex.json_scanner_.c -o $@-scanner.o
+	$(CC) $(OFLAGS) $(WFLAGS) -I$(INC_DIR) \
+	    $(TOKENIZER_TEST_SRC) $(BUILD_DIR)/y.tab.c $@-scanner.o -lm -o $@
+
+test-tokenizer-asan: $(BUILD_DIR)/test-tokenizer-asan
+	$(PYTHON) test/tokenizer/tokenizer.py $< $(TOKENIZER_MODELS)
+
+$(BUILD_DIR)/test-tokenizer-asan: $(TOKENIZER_TEST_DEP)
+	clang -O1 -g -fsanitize=address $(filter-out -Wextra,$(WFLAGS)) \
+	    -I$(INC_DIR) -c $(BUILD_DIR)/lex.json_scanner_.c -o $@-scanner.o
+	clang -O1 -g -fsanitize=address $(WFLAGS) -I$(INC_DIR) \
+	    $(TOKENIZER_TEST_SRC) $(BUILD_DIR)/y.tab.c $@-scanner.o -lm -o $@

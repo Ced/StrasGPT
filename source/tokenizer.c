@@ -1,227 +1,656 @@
+// Simple, self-contained byte-level BPE, focused on English and French.
+
 #include "options.h"
 #include "tokenizer.h"
 #include "util.h"
-#include <ctype.h>
-#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// Allocate a tokenizer_t structure
 tokenizer_t* tokenizer_malloc(void) {
-  tokenizer_t* tokenizer = calloc(1, sizeof(tokenizer_t));
-  if (!tokenizer) {
-    UTIL_DIE("failed to malloc for tokenizer_t");
+  tokenizer_t* t = calloc(1, sizeof(*t));
+  if (!t) {
+    UTIL_DIE("failed to malloc for tokenizer");
   }
-  return tokenizer;
+  // Missing special-token IDs are absent, not token zero.
+  t->bos_token_id = -1;
+  t->eos_token_id = -1;
+  return t;
 }
 
-// Free a tokenizer_t structure
-void tokenizer_free(tokenizer_t* tokenizer) {
-  if (tokenizer) {
-    for (size_t i = 0; i < tokenizer->token_string_count; i++) {
-      free(tokenizer->token_string[i]);
-    }
-    free(tokenizer);
-  }
-}
-
-// Print a tokenizer_t structure
-void tokenizer_print(FILE* f, const tokenizer_t* tokenizer) {
-  if (!tokenizer) {
-    fprintf(f, "Tokenizer: NULL\n");
+void tokenizer_free(tokenizer_t* t) {
+  if (!t) {
     return;
   }
-
-  fprintf(f, "Tokenizer:\n");
-  fprintf(f, "- Special tokens:\n");
-  fprintf(f, "--- bos_token_id: %d\n", tokenizer->bos_token_id);
-  fprintf(f, "--- eos_token_id: %d\n", tokenizer->eos_token_id);
-
-  // Print token strings (only first and last TOKENIZER_MAX_PRINT)
-  size_t sample_count = TOKENIZER_MAX_PRINT;
-  size_t total = tokenizer->token_string_count;
-
-  fprintf(f, "- Token strings (%zu):\n", total);
-  size_t i = 0;
-  for (; i < sample_count && i < total; i++) {
-    fprintf(
-        f,
-        "--- Token string[%6zu]: score=%10.3f string=%s\n",
-        i,
-        tokenizer->score[i],
-        tokenizer->token_string[i]
-    );
+  for (size_t i = 0; i < t->token_string_count; i++) {
+    free(t->token_string[i]);
   }
-  if (2 * sample_count < total) {
-    fprintf(stderr, "--- ...\n");
+  for (size_t i = 0; i < t->merge_count; i++) {
+    free(t->merge[i].string);
   }
-  size_t tail_start = (2 * sample_count < total) ? (total - sample_count) : i;
-  for (i = tail_start; i < total; i++) {
-    fprintf(
-        f,
-        "--- Token string[%6zu]: score=%10.3f string=%s\n",
-        i,
-        tokenizer->score[i],
-        tokenizer->token_string[i]
-    );
-  }
+  free(t->merge);
+  free(t->pattern);
+  free(t);
+}
 
-  fprintf(f, "- Max token string length: %zu\n", tokenizer->max_token_string_len);
+void tokenizer_add_token(tokenizer_t* t, char* string, int id, bool added) {
+  if (id < 0 || id >= TOKENIZER_MAX_TOKEN_STRING || !string[0]) {
+    UTIL_ERROR("invalid tokenizer vocabulary entry");
+  }
+  if (t->token_string[id]) {
+    // Added tokens may also appear in the model vocabulary.
+    if (strcmp(t->token_string[id], string) || (!added && !t->added[id])) {
+      UTIL_ERROR("duplicate tokenizer vocabulary id");
+    }
+    free(string);
+  } else {
+    t->token_string[id] = string;
+  }
+  t->added[id] |= added;
+  t->token_string_count = UTIL_MAX(t->token_string_count, (size_t)id + 1);
+}
+
+// Merge priority follows model.merges order, independently of token IDs.
+void tokenizer_add_merge(tokenizer_t* t, char* string) {
+  if (t->merge_count == t->merge_capacity) {
+    t->merge_capacity = t->merge_capacity ? t->merge_capacity * 2 : 1024;
+    tokenizer_merge_t* merge =
+        realloc(t->merge, t->merge_capacity * sizeof(*merge));
+    if (!merge) {
+      UTIL_DIE("failed to realloc for tokenizer merges");
+    }
+    t->merge = merge;
+  }
+  t->merge[t->merge_count] =
+      (tokenizer_merge_t){.string = string, .rank = t->merge_count};
+  t->merge_count++;
+}
+
+// Read one valid UTF-8 codepoint. BPE itself operates on bytes.
+static unsigned int utf8_read(const char** text) {
+  const unsigned char* p = (const unsigned char*)*text;
+  unsigned int cp = *p++;
+  size_t count = 0;
+  unsigned int min = 0;
+  if (cp >= 0xc2 && cp <= 0xdf) {
+    cp &= 31;
+    count = 1;
+    min = 0x80;
+  } else if (cp >= 0xe0 && cp <= 0xef) {
+    cp &= 15;
+    count = 2;
+    min = 0x800;
+  } else if (cp >= 0xf0 && cp <= 0xf4) {
+    cp &= 7;
+    count = 3;
+    min = 0x10000;
+  } else if (cp >= 0x80) {
+    UTIL_ERROR("invalid UTF-8 in tokenizer input");
+  }
+  for (size_t i = 0; i < count; i++) {
+    if ((*p & 0xc0) != 0x80) {
+      UTIL_ERROR("invalid UTF-8 continuation");
+    }
+    cp = (cp << 6) | (*p++ & 63);
+  }
+  if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+    UTIL_ERROR("invalid UTF-8 codepoint");
+  }
+  *text = (const char*)p;
+  return cp;
+}
+
+// Inverse of the GPT-2/Hugging Face ByteLevel alphabet. Printable Latin-1
+// bytes keep their codepoints; the other bytes use U+0100 and up in order.
+// JSON escapes have already been decoded by the parser. The returned byte
+// length includes any embedded NUL, so callers must not use strlen instead.
+static size_t decode_bpe_bytes(char* string) {
+  int byte[512];
+  for (size_t i = 0; i < 512; i++) {
+    byte[i] = -1;
+  }
+  size_t next = 256;
+  for (size_t i = 0; i < 256; i++) {
+    bool printable =
+        (i >= 33 && i <= 126) || (i >= 161 && i <= 172) || i >= 174;
+    byte[printable ? i : next++] = (int)i;
+  }
+  const char* in = string;
+  size_t len = 0;
+  while (*in) {
+    unsigned int cp = utf8_read(&in);
+    if (cp >= 512 || byte[cp] < 0) {
+      UTIL_ERROR("invalid ByteLevel vocabulary character");
+    }
+    string[len++] = (char)byte[cp];
+  }
+  string[len] = '\0';
+  return len;
 }
 
 static int compare_token_strings(const void* a, const void* b) {
-  return strcmp(
-      ((tokenizer_index_t*)a)->token_string,
-      ((tokenizer_index_t*)b)->token_string
-  );
+  const tokenizer_index_t* x = a;
+  const tokenizer_index_t* y = b;
+  size_t len = UTIL_MIN(x->token_string_len, y->token_string_len);
+  int cmp = memcmp(x->token_string, y->token_string, len);
+  if (cmp) {
+    return cmp;
+  }
+  return (x->token_string_len > y->token_string_len) -
+         (x->token_string_len < y->token_string_len);
 }
 
-// Decode byte-level BPE string in-place
-// Strings from the tokenizer.json file have been processed by tiktoken that
-// uses a reversible "byte -> printable Unicode" map so every byte 0–255 can
-// appear in a UTF-8 string (e.g., space character " " becomes readable "Ġ").
-// The following function decodes strings back, this is done in-place as
-// decoded string is shorter than encoded one.
-static void decode_bpe_bytes_inplace(char* str) {
-  size_t read_pos = 0;
-  size_t write_pos = 0;
-  size_t len = strlen(str);
-
-  while (read_pos < len) {
-    unsigned char c = (unsigned char)str[read_pos];
-
-    // Check if this is a 2-byte UTF-8 sequence
-    if (c >= 0xC0 && c <= 0xDF && read_pos + 1 < len) {
-      unsigned char c2 = (unsigned char)str[read_pos + 1];
-      int codepoint = ((c & 0x1F) << 6) | (c2 & 0x3F);
-
-      // Check if this is in the byte-level BPE range (U+0100 to U+01FF)
-      if (codepoint >= 0x0100 && codepoint <= 0x01FF) {
-        str[write_pos++] = (char)(codepoint - 0x0100);
-        read_pos += 2;
-      } else {
-        // Not a byte-level encoding, keep as-is
-        str[write_pos++] = str[read_pos++];
-      }
-    } else {
-      // Regular ASCII or already decoded
-      str[write_pos++] = str[read_pos++];
-    }
-  }
-
-  str[write_pos] = '\0';
-}
-
-// Read and prepare a tokenizer from options, extracted from tokenizer.json
-// file in the model directory. Token strings are decoded in-place and sorted
-// by score. Single-byte strings are filled.
-tokenizer_t* parser_parse_tokenizer(const char* path);
-tokenizer_t* tokenizer_read(options_t* options) {
-  // Read vocabulary (strings + scores)
-  tokenizer_t* tokenizer = parser_parse_tokenizer(options->model_dir);
-
-  // Decode "printable unicode" tiktoken strings to raw bytes
-  for (size_t i = 0; i < tokenizer->token_string_count; i++) {
-    decode_bpe_bytes_inplace(tokenizer->token_string[i]);
-  }
-
-  // Sort according to scores
-  for (size_t i = 0; i < tokenizer->token_string_count; i++) {
-    tokenizer->sorted_token_string[i].token_string = tokenizer->token_string[i];
-    tokenizer->sorted_token_string[i].id = i;
-  }
-  qsort(
-      tokenizer->sorted_token_string,
-      tokenizer->token_string_count,
-      sizeof(*tokenizer->sorted_token_string),
+static int str_lookup(tokenizer_t* t, char* string, size_t len) {
+  tokenizer_index_t key = {.token_string = string, .token_string_len = len};
+  tokenizer_index_t* found = bsearch(
+      &key,
+      t->sorted_token_string,
+      t->sorted_token_string_count,
+      sizeof(key),
       compare_token_strings
   );
-
-  // Fill single-byte strings
-  for (size_t i = 0; i < TOKENIZER_MAX_BYTE_STRING / 2; i++) {
-    tokenizer->byte_string[i * 2] = (unsigned char)i;
-    tokenizer->byte_string[i * 2 + 1] = '\0';
-  }
-
-  // Set max_token_string_len
-  size_t max = 0;
-  for (size_t i = 0; i < tokenizer->token_string_count; i++) {
-    size_t len = strlen(tokenizer->token_string[i]);
-    max = (len > max) ? len : max;
-  }
-  tokenizer->max_token_string_len = max;
-
-  return tokenizer;
+  return found ? found->id : -1;
 }
 
-// ----------------------------------------------------------------------------
-// Note: remainder of the code is mostly from llama2.c and llama3.c projects
+static int compare_merges(const void* a, const void* b) {
+  const tokenizer_merge_t* x = a;
+  const tokenizer_merge_t* y = b;
+  if (x->left != y->left) {
+    return (x->left > y->left) ? 1 : -1;
+  }
+  return (x->right > y->right) - (x->right < y->right);
+}
 
-// Print a token string, taking care of raw byte tokens
-void tokenizer_print_token_string(FILE* f, char* token_string) {
-  if (token_string == NULL) {
+// Recognize the Split + ByteLevel patterns used by Qwen3, Qwen3.5, Llama 3,
+// Mistral Nemo and GPT-OSS. Select rules from the pattern, not the model name.
+// Matching uses loops with no regex dependency; unknown patterns are rejected.
+void tokenizer_set_pattern(tokenizer_t* t, char* pattern) {
+  static const char pattern_qwen3[] =
+      "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{"
+      "L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+"
+      "(?!\\S)|\\s+";
+  static const char pattern_qwen35[] =
+      "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p"
+      "{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s"
+      "*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+  static const char pattern_llama[] =
+      "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{"
+      "L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]"
+      "+|\\s+(?!\\S)|\\s+";
+  static const char pattern_nemo[] =
+      "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*"
+      "[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+|[^\\r\\n\\p{L}\\p{N}]?[\\p{L"
+      "u}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M"
+      "}]*|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s"
+      "+(?!\\S)|\\s+";
+  static const char pattern_gpt_oss[] =
+      "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*"
+      "[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll"
+      "|'d)?|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\"
+      "p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*(?i:'s|'t|'re|'ve|"
+      "'m|'ll|'d)?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|"
+      "\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+  const char* patterns[] = {
+      pattern_qwen3,
+      pattern_qwen35,
+      pattern_llama,
+      pattern_nemo,
+      pattern_gpt_oss
+  };
+  if (t->pattern) {
+    UTIL_ERROR("multiple tokenizer split patterns");
+  }
+  for (size_t i = 0; i < 5; i++) {
+    if (strcmp(pattern, patterns[i])) {
+      continue;
+    }
+    t->pattern = pattern;
+    t->marks = i == 1 || i >= 3;
+    t->case_split = i >= 3;
+    t->contractions = i != 3;
+    t->digit_count = (i == 2 || i == 4) ? 3 : 1;
     return;
   }
-  if (token_string[0] == '\0') {
-    return;
+  UTIL_ERROR("unsupported tokenizer split pattern");
+}
+
+tokenizer_t* parser_parse_tokenizer(const char* path);
+// Load the supported tokenizer.json subset, not arbitrary HF pipelines.
+// The parser rejects unsupported normalizer types and added-token options.
+// Scans, arrays and binary searches keep the implementation straightforward.
+tokenizer_t* tokenizer_read(options_t* options) {
+  tokenizer_t* t = parser_parse_tokenizer(options->model_dir);
+  if (!t->byte_level || !t->pattern) {
+    UTIL_ERROR("expected a supported Split + ByteLevel tokenizer");
   }
-  if (token_string[1] == '\0') {
-    unsigned char byte_val = token_string[0];
-    if (!(isprint(byte_val) || isspace(byte_val))) {
-      return; // Bad byte, don't print it
+  for (size_t i = 0; i < 256; i++) {
+    t->byte_token[i] = -1;
+  }
+  for (size_t i = 0; i < t->token_string_count; i++) {
+    char* string = t->token_string[i];
+    if (!string) {
+      continue;
+    }
+    size_t len;
+    if (t->added[i]) {
+      t->added_token[t->added_count++] = (int)i;
+      len = strlen(string);
+    } else {
+      len = decode_bpe_bytes(string);
+      if (len == 1) {
+        t->byte_token[(unsigned char)string[0]] = (int)i;
+      }
+      t->sorted_token_string[t->sorted_token_string_count++] =
+          (tokenizer_index_t){string, len, (int)i};
+    }
+    t->token_string_len[i] = len;
+  }
+  for (size_t i = 0; i < 256; i++) {
+    if (t->byte_token[i] < 0) {
+      UTIL_ERROR("missing ByteLevel byte token");
     }
   }
-  fprintf(f, "%s", token_string);
+  qsort(
+      t->sorted_token_string,
+      t->sorted_token_string_count,
+      sizeof(*t->sorted_token_string),
+      compare_token_strings
+  );
+  for (size_t i = 0; i < t->merge_count; i++) {
+    tokenizer_merge_t* m = t->merge + i;
+    char* right = strchr(m->string, ' ');
+    if (!right || right == m->string || !right[1] || strchr(right + 1, ' ')) {
+      UTIL_ERROR("invalid tokenizer merge pair");
+    }
+    *right++ = '\0';
+    size_t left_len = decode_bpe_bytes(m->string);
+    size_t right_len = decode_bpe_bytes(right);
+    m->left = str_lookup(t, m->string, left_len);
+    m->right = str_lookup(t, right, right_len);
+    memmove(m->string + left_len, right, right_len);
+    m->result = str_lookup(t, m->string, left_len + right_len);
+    if (m->left < 0 || m->right < 0 || m->result < 0) {
+      UTIL_ERROR("merge references missing vocabulary entry");
+    }
+    free(m->string);
+    m->string = NULL;
+  }
+  qsort(t->merge, t->merge_count, sizeof(*t->merge), compare_merges);
+  for (size_t i = 1; i < t->merge_count; i++) {
+    if (!compare_merges(t->merge + i - 1, t->merge + i)) {
+      UTIL_ERROR("duplicate tokenizer merge pair");
+    }
+  }
+  return t;
+}
+
+// Return actual token spellings, including added tokens and special tokens.
+char* tokenizer_decode(tokenizer_t* t, int token) {
+  if (token < 0 || (size_t)token >= t->token_string_count ||
+      !t->token_string[token]) {
+    return "<|unknown_token|>";
+  }
+  return t->token_string[token];
+}
+
+// Tokens can end in the middle of a UTF-8 character, or contain NUL.
+// Preserve every byte rather than filter incomplete characters.
+void tokenizer_print_token(FILE* f, tokenizer_t* t, int token) {
+  char* string = tokenizer_decode(t, token);
+  size_t len = strlen(string);
+  if (token >= 0 && (size_t)token < t->token_string_count &&
+      t->token_string[token]) {
+    len = t->token_string_len[token];
+  }
+  fwrite(string, 1, len, f);
   fflush(f);
 }
 
-// Decode a token into a string, taking care of some special tokens and raw
-// byte tokens
-char* tokenizer_decode(tokenizer_t* t, int token) {
-  if (token == t->bos_token_id) {
-    return TOKENIZER_STRING_TOKEN_BOS;
-  } else if (token == t->eos_token_id) {
-    return TOKENIZER_STRING_TOKEN_EOS;
+void tokenizer_print(FILE* f, const tokenizer_t* t) {
+  if (!t) {
+    fprintf(f, "Tokenizer: NULL\n");
+    return;
   }
-
-  // If token is out of range, we assume special token
-  if (token < 0 || (size_t)token >= t->token_string_count) {
-    return "<|unknown_token|>";
-  }
-
-  char* token_string = t->token_string[token];
-
-  // Careful, some token designate raw bytes, and look like e.g. '<0x01>'
-  // parse this and convert and return the actual byte
-  unsigned char byte_val;
-  if (sscanf(token_string, "<0x%02hhX>", &byte_val) == 1) {
-    token_string = (char*)t->byte_string + byte_val * 2;
-  }
-  return token_string;
+  fprintf(f, "Tokenizer:\n");
+  fprintf(f, "- Token id range: %zu\n", t->token_string_count);
+  fprintf(f, "- Merge count: %zu\n", t->merge_count);
+  fprintf(f, "- Added token count: %zu\n", t->added_count);
+  fprintf(f, "- BOS token id: %d\n", t->bos_token_id);
+  fprintf(f, "- EOS token id: %d\n", t->eos_token_id);
 }
 
-// Efficiently look up a string in the sorted token strings, return its index
-static int str_lookup(
-    char* str,
-    tokenizer_index_t* sorted_token_string,
-    int token_string_count
+void tokenizer_print_tokens(
+    tokenizer_t* t, FILE* f, size_t token_count, int* token, size_t sample_count
 ) {
-  // Efficiently find the perfect match for str in vocab, return its index or -1
-  // if not found
-  tokenizer_index_t tok = {.token_string = str}; // Acts as the key to search for
-  tokenizer_index_t* res = bsearch(
-      &tok,
-      sorted_token_string,
-      token_string_count,
-      sizeof(*sorted_token_string),
-      compare_token_strings
-  );
-  return res != NULL ? res->id : -1;
+  fprintf(f, "Tokens (%zu):\n", token_count);
+  for (size_t i = 0; i < token_count; i++) {
+    if (i >= sample_count && token_count - i > sample_count) {
+      fprintf(f, "- ...\n");
+      i = token_count - sample_count - 1;
+      continue;
+    }
+    fprintf(f, "- Token[%4zu]: %6d (\"", i, token[i]);
+    tokenizer_print_token(f, t, token[i]);
+    fprintf(f, "\")\n");
+  }
+  fflush(f);
 }
 
-// Tokenize a text string into an array of tokens
-// bos != 0 means prepend the BOS token, eos != 0 means append the EOS token
+// Classes cover ASCII, Latin-1, French ligatures, marks U+0300..U+036F and
+// Unicode whitespace, including ordinary and narrow nonbreaking spaces.
+// Other characters use the punctuation class: their bytes are preserved,
+// but token IDs outside this coverage can differ from the reference.
+enum {
+  TOKENIZER_UPPER = 1,
+  TOKENIZER_LOWER = 2,
+  TOKENIZER_OTHER = 4, // Uncased letters
+  TOKENIZER_MARK = 8,
+  TOKENIZER_NUMBER = 16,
+  TOKENIZER_SPACE = 32,
+  TOKENIZER_LETTER = TOKENIZER_UPPER | TOKENIZER_LOWER | TOKENIZER_OTHER
+};
+
+static unsigned int character_class(unsigned int cp) {
+  if ((cp >= 'A' && cp <= 'Z') || (cp >= 0xc0 && cp <= 0xde && cp != 0xd7) ||
+      cp == 0x152 || cp == 0x178) {
+    return TOKENIZER_UPPER;
+  }
+  if ((cp >= 'a' && cp <= 'z') || (cp >= 0xdf && cp <= 0xff && cp != 0xf7) ||
+      cp == 0x153 || cp == 0xb5) {
+    return TOKENIZER_LOWER;
+  }
+  if (cp == 0xaa || cp == 0xba) {
+    return TOKENIZER_OTHER;
+  }
+  if ((cp >= '0' && cp <= '9') || cp == 0xb2 || cp == 0xb3 || cp == 0xb9 ||
+      (cp >= 0xbc && cp <= 0xbe)) {
+    return TOKENIZER_NUMBER;
+  }
+  if (cp >= 0x300 && cp <= 0x36f) {
+    return TOKENIZER_MARK;
+  }
+  if ((cp >= 9 && cp <= 13) || cp == 32 || cp == 0x85 || cp == 0xa0 ||
+      cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200a) || cp == 0x2028 ||
+      cp == 0x2029 || cp == 0x202f || cp == 0x205f || cp == 0x3000) {
+    return TOKENIZER_SPACE;
+  }
+  return 0;
+}
+
+// For models requesting NFC, compose common Latin-1 base/accent pairs and
+// Y with diaeresis. This covers common decomposed French accents, not full
+// Unicode NFC, and needs no Unicode library.
+static unsigned int compose_latin(unsigned int base, unsigned int mark) {
+  static const unsigned int composition[][3] = {
+      {0x0041, 0x0300, 0x00c0}, {0x0041, 0x0301, 0x00c1},
+      {0x0041, 0x0302, 0x00c2}, {0x0041, 0x0303, 0x00c3},
+      {0x0041, 0x0308, 0x00c4}, {0x0041, 0x030a, 0x00c5},
+      {0x0043, 0x0327, 0x00c7}, {0x0045, 0x0300, 0x00c8},
+      {0x0045, 0x0301, 0x00c9}, {0x0045, 0x0302, 0x00ca},
+      {0x0045, 0x0308, 0x00cb}, {0x0049, 0x0300, 0x00cc},
+      {0x0049, 0x0301, 0x00cd}, {0x0049, 0x0302, 0x00ce},
+      {0x0049, 0x0308, 0x00cf}, {0x004e, 0x0303, 0x00d1},
+      {0x004f, 0x0300, 0x00d2}, {0x004f, 0x0301, 0x00d3},
+      {0x004f, 0x0302, 0x00d4}, {0x004f, 0x0303, 0x00d5},
+      {0x004f, 0x0308, 0x00d6}, {0x0055, 0x0300, 0x00d9},
+      {0x0055, 0x0301, 0x00da}, {0x0055, 0x0302, 0x00db},
+      {0x0055, 0x0308, 0x00dc}, {0x0059, 0x0301, 0x00dd},
+      {0x0061, 0x0300, 0x00e0}, {0x0061, 0x0301, 0x00e1},
+      {0x0061, 0x0302, 0x00e2}, {0x0061, 0x0303, 0x00e3},
+      {0x0061, 0x0308, 0x00e4}, {0x0061, 0x030a, 0x00e5},
+      {0x0063, 0x0327, 0x00e7}, {0x0065, 0x0300, 0x00e8},
+      {0x0065, 0x0301, 0x00e9}, {0x0065, 0x0302, 0x00ea},
+      {0x0065, 0x0308, 0x00eb}, {0x0069, 0x0300, 0x00ec},
+      {0x0069, 0x0301, 0x00ed}, {0x0069, 0x0302, 0x00ee},
+      {0x0069, 0x0308, 0x00ef}, {0x006e, 0x0303, 0x00f1},
+      {0x006f, 0x0300, 0x00f2}, {0x006f, 0x0301, 0x00f3},
+      {0x006f, 0x0302, 0x00f4}, {0x006f, 0x0303, 0x00f5},
+      {0x006f, 0x0308, 0x00f6}, {0x0075, 0x0300, 0x00f9},
+      {0x0075, 0x0301, 0x00fa}, {0x0075, 0x0302, 0x00fb},
+      {0x0075, 0x0308, 0x00fc}, {0x0079, 0x0301, 0x00fd},
+      {0x0079, 0x0308, 0x00ff}, {0x0059, 0x0308, 0x0178},
+  };
+  size_t count = sizeof(composition) / sizeof(*composition);
+  for (size_t i = 0; i < count; i++) {
+    if (composition[i][0] == base && composition[i][1] == mark) {
+      return composition[i][2];
+    }
+  }
+  return 0;
+}
+
+static size_t contraction_len(const unsigned int* cp, size_t len, size_t i) {
+  if (i + 1 >= len || cp[i] != '\'') {
+    return 0;
+  }
+  unsigned int a = cp[i + 1];
+  if (a >= 'A' && a <= 'Z') {
+    a += 'a' - 'A';
+  }
+  if (a == 's' || a == 't' || a == 'm' || a == 'd') {
+    return 2;
+  }
+  if (i + 2 >= len) {
+    return 0;
+  }
+  unsigned int b = cp[i + 2];
+  if (b >= 'A' && b <= 'Z') {
+    b += 'a' - 'A';
+  }
+  if ((a == 'l' && b == 'l') || (a == 'v' && b == 'e') ||
+      (a == 'r' && b == 'e')) {
+    return 3;
+  }
+  return 0;
+}
+
+// Return the next piece boundary using the selected pattern and our Latin
+// classes: digit grouping, contractions, case, punctuation and whitespace.
+static size_t piece_end(
+    tokenizer_t* t,
+    const unsigned int* cp,
+    const unsigned int* cls,
+    size_t len,
+    size_t start
+) {
+  size_t end;
+  if (t->contractions && !t->case_split) {
+    size_t count = contraction_len(cp, len, start);
+    if (count) {
+      return start + count;
+    }
+  }
+  unsigned int letters = TOKENIZER_LETTER | (t->marks ? TOKENIZER_MARK : 0);
+  bool prefix = cp[start] != '\r' && cp[start] != '\n' &&
+                !(cls[start] & (TOKENIZER_LETTER | TOKENIZER_NUMBER));
+  // Try the optional prefix first; allow it to backtrack for a lone mark.
+  for (size_t attempt = 0; attempt <= (size_t)prefix; attempt++) {
+    size_t word = start + (prefix && attempt == 0);
+    end = word;
+    if (!t->case_split) {
+      while (end < len && (cls[end] & letters)) {
+        end++;
+      }
+      if (end > word) {
+        return end;
+      }
+    } else {
+      // Uppercase/mark* lowercase/mark+, then uppercase/mark+ lowercase*.
+      while (end < len && (cls[end] & (TOKENIZER_UPPER | TOKENIZER_OTHER |
+                                       TOKENIZER_MARK))) {
+        end++;
+      }
+      size_t middle = end;
+      while (end < len && (cls[end] & (TOKENIZER_LOWER | TOKENIZER_OTHER |
+                                       TOKENIZER_MARK))) {
+        end++;
+      }
+      bool first = end > middle ||
+                   (middle > word &&
+                    (cls[middle - 1] & (TOKENIZER_OTHER | TOKENIZER_MARK)));
+      if (first || middle > word) {
+        if (t->contractions) {
+          end += contraction_len(cp, len, end);
+        }
+        return end;
+      }
+    }
+  }
+  if (cls[start] & TOKENIZER_NUMBER) {
+    end = start;
+    while (end < len && end - start < t->digit_count &&
+           (cls[end] & TOKENIZER_NUMBER)) {
+      end++;
+    }
+    return end;
+  }
+  // Optional ASCII space, punctuation run, then newline (or slash) suffix.
+  end = start + (cp[start] == ' ');
+  size_t punctuation = end;
+  unsigned int excluded = TOKENIZER_SPACE | TOKENIZER_LETTER | TOKENIZER_NUMBER;
+  if (t->marks && !t->case_split) {
+    excluded |= TOKENIZER_MARK;
+  }
+  while (end < len && !(cls[end] & excluded)) {
+    end++;
+  }
+  if (end > punctuation) {
+    while (end < len && (cp[end] == '\r' || cp[end] == '\n' ||
+                         (t->case_split && cp[end] == '/'))) {
+      end++;
+    }
+    return end;
+  }
+  end = start;
+  size_t newline = start;
+  while (end < len && (cls[end] & TOKENIZER_SPACE)) {
+    if (cp[end] == '\r' || cp[end] == '\n') {
+      newline = end + 1;
+    }
+    end++;
+  }
+  if (newline > start) {
+    return newline;
+  }
+  // Leave the last space for the following word unless at end of input.
+  if (end < len && end - start > 1) {
+    return end - 1;
+  }
+  if (end > start) {
+    return end;
+  }
+  return start + 1;
+}
+
+// Merge only within this piece. ignore_merges allows a direct vocabulary
+// lookup of the complete piece before applying ordered pair merges.
+static void encode_piece(
+    tokenizer_t* t, char* text, size_t len, size_t* token_count, int* token
+) {
+  if (t->ignore_merges) {
+    int id = str_lookup(t, text, len);
+    if (id >= 0) {
+      token[(*token_count)++] = id;
+      return;
+    }
+  }
+  size_t start = *token_count;
+  for (size_t i = 0; i < len; i++) {
+    token[(*token_count)++] = t->byte_token[(unsigned char)text[i]];
+  }
+  while (*token_count > start + 1) {
+    size_t best_rank = SIZE_MAX;
+    size_t best_index = 0;
+    int best_id = -1;
+    for (size_t i = start; i + 1 < *token_count; i++) {
+      tokenizer_merge_t key = {.left = token[i], .right = token[i + 1]};
+      tokenizer_merge_t* merge =
+          bsearch(&key, t->merge, t->merge_count, sizeof(key), compare_merges);
+      if (merge && merge->rank < best_rank) {
+        best_rank = merge->rank;
+        best_index = i;
+        best_id = merge->result;
+      }
+    }
+    if (best_id < 0) {
+      break;
+    }
+    token[best_index] = best_id;
+    for (size_t i = best_index + 1; i + 1 < *token_count; i++) {
+      token[i] = token[i + 1];
+    }
+    (*token_count)--;
+  }
+}
+
+static void encode_text(
+    tokenizer_t* t,
+    const char* text,
+    size_t len,
+    size_t* token_count,
+    int* token
+) {
+  if (!len) {
+    return;
+  }
+  // At most one codepoint per input byte. Composition only shortens input.
+  char* bytes = malloc(len + 1);
+  unsigned int* cp = malloc(len * sizeof(*cp));
+  unsigned int* cls = malloc(len * sizeof(*cls));
+  size_t* offset = malloc((len + 1) * sizeof(*offset));
+  if (!bytes || !cp || !cls || !offset) {
+    UTIL_DIE("failed to malloc for pre-tokenization");
+  }
+  memcpy(bytes, text, len);
+  bytes[len] = '\0';
+  const char* in = bytes;
+  size_t count = 0;
+  size_t out = 0;
+  while (*in) {
+    const char* previous = in;
+    unsigned int value = utf8_read(&in);
+    unsigned int composed =
+        count && t->normalize ? compose_latin(cp[count - 1], value) : 0;
+    if (composed) {
+      cp[count - 1] = composed;
+      out = offset[count - 1];
+      // All entries in the Latin composition table use two UTF-8 bytes.
+      bytes[out++] = 0xc0 | (composed >> 6);
+      bytes[out++] = 0x80 | (composed & 63);
+    } else {
+      offset[count] = out;
+      cp[count++] = value;
+      size_t size = (size_t)(in - previous);
+      memmove(bytes + out, previous, size);
+      out += size;
+    }
+  }
+  offset[count] = out;
+  for (size_t i = 0; i < count; i++) {
+    cls[i] = character_class(cp[i]);
+  }
+  for (size_t i = 0; i < count;) {
+    size_t end = piece_end(t, cp, cls, count, i);
+    encode_piece(
+        t, bytes + offset[i], offset[end] - offset[i], token_count, token
+    );
+    i = end;
+  }
+  free(bytes);
+  free(cp);
+  free(cls);
+  free(offset);
+}
+
+// Input must be valid UTF-8 without embedded NUL. Match literal added tokens
+// before normalization, choosing the longest match at the earliest position.
+// Their single_word, lstrip, rstrip and normalized options must be false.
+// Instruction wrapping is handled by the application.
+//
+// Tokenizer corrections can change prompt IDs and generated text without
+// changing inference arithmetic. Compare builds using the same tokenizer
+// behavior or explicit pre-tokenized input.
 void tokenizer_tokenize(
     tokenizer_t* t,
     char* text,
@@ -230,199 +659,45 @@ void tokenizer_tokenize(
     size_t* token_count,
     int** token_ptr
 ) {
-  if (text == NULL) {
+  if (!text) {
     UTIL_DIE("cannot encode NULL text");
   }
-
-  // Allocate +3 for '\0', ?BOS, ?EOS
-  *token_ptr = malloc((strlen(text) + 3) * sizeof(**token_ptr));
-  if (*token_ptr == NULL) {
+  size_t len = strlen(text);
+  if (len > SIZE_MAX / sizeof(**token_ptr) - 2) {
+    UTIL_ERROR("tokenizer input is too large");
+  }
+  int* token = malloc((len + 2) * sizeof(*token));
+  if (!token) {
     UTIL_DIE("failed to malloc for tokens");
   }
-  int* token = *token_ptr;
-
-  // Create a temporary buffer that will store merge candidates of always two
-  // consecutive token *2 for concat, +1 for null terminator +2 for UTF8 (in
-  // case max_token_length is 1)
-  size_t str_buffer_size = (t->max_token_string_len * 2 + 1 + 2) * sizeof(char);
-  char* str_buffer = malloc(str_buffer_size);
-  size_t str_len = 0;
-
-  // Start at 0 token
+  *token_ptr = token;
   *token_count = 0;
-
-  // Add optional BOS token, if desired
-  if (bos) {
+  if (bos && t->bos_token_id >= 0) {
     token[(*token_count)++] = t->bos_token_id;
   }
-
-  // add_dummy_prefix is true by default
-  // so prepend a dummy prefix token to the input string, but only if text != ""
-  // TODO: pretty sure this isn't correct in the general case but I don't have
-  // the energy to read more of the sentencepiece code to figure out what it's
-  // doing
-
-  // Okay UTF-8 time. This will get messy. Here is the reference from Wikipedia:
-  // Code point ↔ UTF-8 conversion
-  // First code point	Last code point	Byte 1	Byte 2	Byte 3	Byte 4
-  // U+0000  U+007F    0xxxxxxx
-  // U+0080  U+07FF    110xxxxx 10xxxxxx
-  // U+0800  U+FFFF    1110xxxx 10xxxxxx 10xxxxxx
-  // U+10000 U+10FFFF  11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
-
-  // Process the raw (UTF-8) byte sequence of the input string
-  for (char* c = text; *c != '\0'; c++) {
-
-    // Reset buffer if the current byte is ASCII or a leading byte
-    // 0xC0 is 11000000, so (*c & 0xC0) keeps the first 2 bits and zeros the
-    // rest 0x80 is 10000000 in UTF-8, all continuation bytes start with "10" in
-    // first two bits so in English this is: "if this byte is not a continuation
-    // byte"
-    if ((*c & 0xC0) != 0x80) {
-      // This byte must be either a leading byte (11...) or an ASCII char
-      // (0x...)
-      // => reset our location, as we're starting a new UTF-8 codepoint
-      str_len = 0;
-    }
-
-    // Append the current byte to the buffer
-    // note: ++ is post-increment, incremented after this line
-    str_buffer[str_len++] = *c;
-    str_buffer[str_len] = '\0';
-
-    // While the next character is a continuation byte, continue appending
-    // but if there are too many of them, just stop to avoid overruning
-    // str_buffer size.
-    if ((*(c + 1) & 0xC0) == 0x80 && str_len < 4) {
-      continue;
-    }
-
-    // OK c+1 is not a continuation byte, so we've read in a full codepoint
-    int id = str_lookup(
-        str_buffer, t->sorted_token_string, t->token_string_count
-    );
-
-    if (id != -1) {
-      // We found this codepoint in vocab, add it as a token
-      token[(*token_count)++] = id;
-    } else {
-      // byte_fallback encoding: just encode each byte as a token
-      // +3 is here because the first 3 vocab elements are <unk>, <s>, </s>
-      // so the individual bytes only start at index 3
-      for (size_t i = 0; i < str_len; i++) {
-        token[(*token_count)++] = (unsigned char)str_buffer[i] + 3;
+  const char* end = text + len;
+  while (text < end) {
+    // Added tokens are literal, non-normalized strings in supported files.
+    const char* next = end;
+    int added_id = -1;
+    size_t added_len = 0;
+    for (size_t i = 0; i < t->added_count; i++) {
+      int id = t->added_token[i];
+      const char* match = strstr(text, t->token_string[id]);
+      size_t size = t->token_string_len[id];
+      if (match && (match < next || (match == next && size > added_len))) {
+        next = match;
+        added_id = id;
+        added_len = size;
       }
     }
-    str_len = 0; // Protect against a sequence of stray UTF8 continuation bytes
+    encode_text(t, text, (size_t)(next - text), token_count, token);
+    if (added_id >= 0) {
+      token[(*token_count)++] = added_id;
+    }
+    text = (char*)next + added_len;
   }
-
-  // Merge the best consecutive pair or triple each iteration, according to the
-  // scores in vocab_scores
-  while (1) {
-    float best_score = -1e10;
-    int best_id = -1;
-    int best_idx = -1;
-    // Length of the best merge sequence (2 for pair, 3 for triple)
-    int best_len = 2;
-
-    // First, try to find the best pair to merge
-    for (int i = 0; i < ((int)*token_count - 1); i++) {
-      // Check if we can merge the pair (token[i], token[i+1])
-      snprintf(
-          str_buffer,
-          str_buffer_size,
-          "%s%s",
-          t->token_string[token[i]],
-          t->token_string[token[i + 1]]
-      );
-      int id = str_lookup(
-          str_buffer, t->sorted_token_string, t->token_string_count
-      );
-      if (id != -1 && t->score[id] > best_score) {
-        // This merge pair exists in vocab! record its score and position
-        best_score = t->score[id];
-        best_id = id;
-        best_idx = i;
-      }
-    }
-
-    // If no pair was found, try to find the best triple to merge
-    if (best_idx == -1) {
-      for (int i = 0; i < ((int)*token_count - 2); i++) {
-        // Check if we can merge the triple (token[i], token[i+1],
-        // token[i+2])
-        snprintf(
-            str_buffer,
-            str_buffer_size,
-            "%s%s%s",
-            t->token_string[token[i]],
-            t->token_string[token[i + 1]],
-            t->token_string[token[i + 2]]
-        );
-        int id = str_lookup(
-            str_buffer, t->sorted_token_string, t->token_string_count
-        );
-        if (id != -1 && t->score[id] > best_score) {
-          // This merge triple exists in vocab! record its score and position
-          best_score = t->score[id];
-          best_id = id;
-          best_idx = i;
-          best_len = 3;
-        }
-      }
-    }
-
-    if (best_idx == -1) {
-      // We couldn't find any more pairs or triples to merge, so we're done
-      break;
-    }
-
-    // Merge the consecutive pair or triple (best_idx, best_idx+1[, best_idx+2])
-    // into new token best_id
-    token[best_idx] = best_id;
-    // Delete token(s) at position best_idx+1 (and optionally best_idx+2), shift
-    // the entire sequence back
-    for (int i = best_idx + 1; i < ((int)*token_count - best_len + 1); i++) {
-      token[i] = token[i + best_len - 1];
-    }
-    // Token length decreased by the number of merged token minus one
-    (*token_count) -= (best_len - 1);
-  }
-
-  // Add optional EOS token, if desired
-  if (eos) {
+  if (eos && t->eos_token_id >= 0) {
     token[(*token_count)++] = t->eos_token_id;
   }
-
-  free(str_buffer);
-}
-
-// Print the first and last sample_count tokens from a token array
-void tokenizer_print_tokens(
-    tokenizer_t* tokenizer,
-    FILE* f,
-    size_t token_count,
-    int* token,
-    size_t sample_count
-) {
-  fprintf(f, "Tokens (%zu):\n", token_count);
-  size_t i = 0;
-  for (; i < sample_count && i < token_count; i++) {
-    fprintf(f, "- Token[%4zu]: %6d (\"", i, token[i]);
-    char* token_string = tokenizer_decode(tokenizer, token[i]);
-    tokenizer_print_token_string(f, token_string);
-    fprintf(f, "\")\n");
-  }
-  if (2 * sample_count < token_count) {
-    fprintf(f, "- ...\n");
-  }
-  size_t tail_start =
-      (2 * sample_count < token_count) ? (token_count - sample_count) : i;
-  for (i = tail_start; i < token_count; i++) {
-    fprintf(f, "- Token[%4zu]: %6d (\"", i, token[i]);
-    char* token_string = tokenizer_decode(tokenizer, token[i]);
-    tokenizer_print_token_string(f, token_string);
-    fprintf(f, "\")\n");
-  }
-  fflush(f);
 }

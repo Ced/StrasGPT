@@ -184,10 +184,7 @@ int main(int argc, char* argv[]) {
   // Print the prompt string (in blue)
   fprintf(stderr, "\033[1;34m");
   for (size_t i = 0; i < token_count; i++) {
-    char* decoded = tokenizer_decode(tokenizer, token[i]);
-    if (decoded) {
-      tokenizer_print_token_string(stderr, decoded);
-    }
+    tokenizer_print_token(stderr, tokenizer, token[i]);
   }
   fprintf(stderr, "\033[0m");
 
@@ -202,7 +199,6 @@ int main(int argc, char* argv[]) {
   size_t vocabulary_len = 0;  // Will be filled by transformer_logits_malloc
   float* logits = transformer_logits_malloc(transformer, 1, &vocabulary_len);
   int predicted_token = 0;
-  char* predicted_string = NULL;
   start = time_in_ms();
   bool continue_generation = true;
 
@@ -218,10 +214,8 @@ int main(int argc, char* argv[]) {
       prefill_time = (end - start) / 1000.0;
       // - Select the next token from the logits (last token for penalty)
       predicted_token = sampler_sample(sampler, logits, token[token_count - 1]);
-      // - Decode the token into a string
-      predicted_string = tokenizer_decode(tokenizer, predicted_token);
-      // - Print the token string
-      tokenizer_print_token_string(stdout, predicted_string);
+      // - Print the decoded token bytes
+      tokenizer_print_token(stdout, tokenizer, predicted_token);
       generated_count++;
 
       start = time_in_ms();
@@ -239,13 +233,12 @@ int main(int argc, char* argv[]) {
         predicted_token = sampler_sample(sampler, logits, predicted_token);
         generated_count++;
         if (predicted_token != tokenizer->eos_token_id) {
-          predicted_string = tokenizer_decode(tokenizer, predicted_token);
-          tokenizer_print_token_string(stdout, predicted_string);
+          tokenizer_print_token(stdout, tokenizer, predicted_token);
           // If we want to dump token ids
           // fprintf(stdout, "%d ", predicted_token);
         } else {
           // End of string token, stop generating (set loop exit condition)
-          fprintf(stdout, "%s", TOKENIZER_STRING_TOKEN_EOS);
+          tokenizer_print_token(stdout, tokenizer, predicted_token);
           continue_generation = false;
         }
         start = time_in_ms();
