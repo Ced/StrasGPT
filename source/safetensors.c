@@ -10,6 +10,16 @@ const char* safetensors_type_str[] = {
     "F16", "BF16", "F32", "U8", "MXFP4", "E8M0"
 };
 
+// Check all end of string token ids supplied by the model configuration
+bool safetensors_is_eos(const safetensors_t* safetensors, int token) {
+  for (size_t i = 0; i < safetensors->eos_token_count; i++) {
+    if (token == safetensors->eos_token_id[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Allocate a safetensors_t structure
 safetensors_t* safetensors_malloc(void) {
   safetensors_t* safetensors = calloc(1, sizeof(safetensors_t));
@@ -17,7 +27,6 @@ safetensors_t* safetensors_malloc(void) {
     UTIL_DIE("failed to malloc for safetensors_t");
   }
   safetensors->bos_token_id = -1;
-  safetensors->eos_token_id = -1;
   safetensors->swa_len = 0;
   safetensors->rope_yarn = false;
   safetensors->rope_factor = 1.0f;
@@ -156,7 +165,11 @@ void safetensors_print(FILE* f, const safetensors_t* safetensors) {
     }
   }
   fprintf(f, "--- bos_token_id:           %d\n", safetensors->bos_token_id);
-  fprintf(f, "--- eos_token_id:           %d\n", safetensors->eos_token_id);
+  fprintf(f, "--- eos_token_id:          ");
+  for (size_t i = 0; i < safetensors->eos_token_count; i++) {
+    fprintf(f, " %d", safetensors->eos_token_id[i]);
+  }
+  fprintf(f, "\n");
 
   fprintf(f, "- Files (%zu):\n", safetensors->file_count);
   for (size_t i = 0; i < safetensors->file_count; i++) {

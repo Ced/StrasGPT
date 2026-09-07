@@ -2,6 +2,7 @@
   #include "safetensors.h"
   #include "tokenizer.h"
   #include "util.h"
+  #include <limits.h>
   #include <math.h>
   #include <stdio.h>
   #include <stdlib.h>
@@ -93,6 +94,33 @@ config_member_list
   | config_member
   ;
 
+eos_token_ids
+  : eos_token
+  | '[' eos_token_list ']'
+  ;
+
+eos_token_list
+  : eos_token
+  | eos_token_list ',' eos_token
+  ;
+
+eos_token
+  : NUMBER
+    {
+      if (!$1.is_int || $1.ival < 0 || $1.ival > INT_MAX) {
+        yyerror("invalid EOS token id");
+        YYABORT;
+      }
+      size_t count = parser_safetensors->eos_token_count;
+      if (count == SAFETENSORS_MAX_EOS_TOKEN_COUNT) {
+        yyerror("too many EOS token ids");
+        YYABORT;
+      }
+      parser_safetensors->eos_token_id[count] = (int)$1.ival;
+      parser_safetensors->eos_token_count++;
+    }
+  ;
+
 config_member
   : BOS_TOKEN_ID ':' NUMBER
     {
@@ -102,14 +130,8 @@ config_member
       }
       parser_safetensors->bos_token_id = (int)$3.ival;
     }
-  | EOS_TOKEN_ID ':' NUMBER
-    {
-      if (!$3.is_int) {
-        yyerror("non integer EOS token id");
-        YYABORT;
-      }
-      parser_safetensors->eos_token_id = (int)$3.ival;
-    }
+  | EOS_TOKEN_ID ':' { parser_safetensors->eos_token_count = 0; }
+    eos_token_ids
   | EMBEDDING_DIM ':' NUMBER
     {
       if (!$3.is_int) {

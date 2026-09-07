@@ -4,7 +4,16 @@
   <img src="assets/llama_math-info.png" width="300" height="300" alt="Cute Llama">
 </p>
 
-This program is a direct C implementation of the Qwen 3.5 / Qwen3 / LLaMa 3.x / Mistral LLM transformer architecture, reusing the tokenizer and the sampler of Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) project and its fork by James Delancey [llama3.c](https://github.com/jameswdelancey/llama3.c) (we warmly thank you!). Given an input prompt, StrasGPT can generate a text that continues it, and it also supports basic instruct mode. It was initially designed as a parallel programming project for master students in 2025 (students had to parallelize it with OpenMP + MPI). It is now getting continued for fun and (polyhedral) compiler research.
+This program is a direct C implementation of the Qwen 3.5 / Qwen3 / LLaMa 3.x /
+Mistral LLM transformer architecture, reusing the tokenizer and the sampler of
+Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) project and
+its fork by James Delancey
+[llama3.c](https://github.com/jameswdelancey/llama3.c) (we warmly thank you!).
+Given an input prompt, StrasGPT can generate a text that continues it, and it
+also supports basic interactive chat. It was initially designed as a parallel
+programming project for master students in 2025 (students had to parallelize it
+with OpenMP + MPI). It is now getting continued for fun and (polyhedral)
+compiler research.
 
 ## Get and compile StrasGPT
 
@@ -87,6 +96,26 @@ Token generation  (decode):    16 tokens in   0.213 s (79.207921 token/s)
 
 Actually not that bad!
 
+## Chat
+
+Use `--chat` with a Qwen, Mistral/Ministral, Llama 3 instruct or gpt-oss
+model:
+
+```bash
+./strasgpt --chat -m ../model_zoo/Qwen3.5-0.8B -n 256 -s 42
+./strasgpt --chat -m ../model_zoo/Llama-3.2-3B-Instruct -n 256 -t 10
+```
+
+Enter one message per line. Empty lines are ignored; `/quit` or EOF exits.
+Conversation history stays in the model cache. `-n` limits each reply; a
+truncated reply is closed before the next user message. When the context is
+full, start a new session. Qwen 3.5 uses its non-thinking prefix and gpt-oss
+uses the final channel for direct answers.
+
+Chat selects the message format automatically.
+It reads stdin and cannot be combined with `-p`, `-f` or `--pre-tokenized`.
+Replies go to stdout and interface labels go to stderr.
+
 ## Regression tests
 
 The regression tests need Python, NumPy, PyTorch, safetensors and the
@@ -122,6 +151,12 @@ can round differently. Chunk sizes and thread counts must produce identical
 binary outputs. Failures report the first mismatching intermediate and index.
 These tests cover the MoE path with ordinary RoPE, not YaRN or native BF16
 reference execution.
+
+### Configuration tests
+
+After building, `python3 test/config/config.py ./strasgpt` checks scalar and
+array EOS token IDs, including malformed arrays, using temporary files.
+It needs only Python's standard library and also works with `make asan`.
 
 ### Tokenizer tests
 

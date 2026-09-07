@@ -57,78 +57,158 @@ static double peak_rss_gb(void) {
 #endif
 }
 
-int main(int argc, char* argv[]) {
-  // Prepare all the components needed for text generation:
-  // - Options from command line arguments
-  options_t* options = options_read(argc, argv);
-  options_print(stderr, options);
-  fprintf(stderr, "\n");
-
-  // Let all processes and threads print their IDs
-  if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
-    UTIL_DIE("MPI_Init failed");
+// Keep conversation history in the transformer cache, including turn endings.
+static void chat(
+    options_t* options,
+    safetensors_t* safetensors,
+    tokenizer_t* tokenizer,
+    transformer_t* transformer,
+    sampler_t* sampler
+) {
+  char* model_type = safetensors->model_type;
+  char* first = "";
+  char* prefix;
+  char* suffix;
+  char* ending;
+  if (model_type && strstr(model_type, "qwen")) {
+    prefix = "<|im_start|>user\n";
+    suffix = "<|im_end|>\n<|im_start|>assistant\n";
+    if (strstr(model_type, "qwen3_5")) {
+      suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    }
+    ending = "<|im_end|>";
+  } else if (model_type && strstr(model_type, "mistral")) {
+    first = "<s>";
+    prefix = "[INST]";
+    suffix = "[/INST]";
+    ending = "</s>";
+  } else if (model_type && strstr(model_type, "llama")) {
+    first = "<|begin_of_text|>";
+    prefix = "<|start_header_id|>user<|end_header_id|>\n\n";
+    suffix = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+    ending = "<|eot_id|>";
+  } else if (model_type && strstr(model_type, "gpt_oss")) {
+    first = "<|start|>system<|message|>You are a helpful assistant."
+            "<|end|>";
+    prefix = "<|start|>user<|message|>";
+    suffix = "<|end|><|start|>assistant<|meta_sep|>final<|message|>";
+    ending = "<|fim_suffix|>";
+    // Older gpt-oss tokenizers use these names for the same delimiters.
+    if (tokenizer->eos_token_id >= 0 &&
+        strcmp(
+            tokenizer->token_string[tokenizer->eos_token_id], "<|return|>"
+        ) == 0) {
+      suffix = "<|end|><|start|>assistant<|channel|>final<|message|>";
+      ending = "<|return|>";
+    }
+  } else {
+    UTIL_ERROR("--chat supports Qwen, Mistral, Llama 3 and gpt-oss models");
   }
-  if (MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank) != MPI_SUCCESS) {
-    UTIL_DIE("MPI_Comm_rank failed");
-  }
-  if (MPI_Comm_size(MPI_COMM_WORLD, &mpi_size) != MPI_SUCCESS) {
-    UTIL_DIE("MPI_Comm_size failed");
-  }
 
-  // Set OpenMP parameters
-  setenv("OMP_WAIT_POLICY", "ACTIVE", 1);
-  omp_set_num_threads(options->thread_count);
-
-#pragma omp parallel
-  fprintf(
-      stderr,
-      "StrasGPT OpenMP thread %2d (total %2d) of MPI rank %2d (total %2d)\n",
-      omp_get_thread_num(),
-      omp_get_num_threads(),
-      mpi_rank,
-      mpi_size
+  size_t ending_count = 0;
+  int* ending_token = NULL;
+  tokenizer_tokenize(
+      tokenizer, ending, false, false, &ending_count, &ending_token
   );
-
-  if (mpi_rank == 0) {
-    fprintf(stderr, "\n");
+  if (ending_count != 1 || !tokenizer->added[ending_token[0]]) {
+    UTIL_ERROR("missing chat end-of-turn token");
   }
 
-  // - Safetensors model files
-  safetensors_t* safetensors = safetensors_read(options);
-  if (options->show_safetensors) {
-    safetensors_print(stderr, safetensors);
-    safetensors_free(safetensors);
-    options_free(options);
-    return EXIT_SUCCESS;
+  size_t vocabulary_len;
+  float* logits = transformer_logits_malloc(transformer, 1, &vocabulary_len);
+  char* line = NULL;
+  size_t line_size = 0;
+  fprintf(stderr, "\nChat: one message per line; /quit or EOF to exit.\n");
+  while (true) {
+    fprintf(stderr, "\nYou: ");
+    fflush(stderr);
+    if (getline(&line, &line_size, stdin) < 0) {
+      break;
+    }
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strcmp(line, "/quit") == 0) {
+      break;
+    }
+    if (!line[0]) {
+      continue;
+    }
+
+    bool first_turn = transformer->state->cached_count == 0;
+    char* separator = !first_turn && strstr(model_type, "qwen") ? "\n" : "";
+    size_t prompt_size = strlen(first) + strlen(separator) + strlen(prefix) +
+                         strlen(line) + strlen(suffix) + 1;
+    char* prompt = malloc(prompt_size);
+    if (!prompt) {
+      UTIL_DIE("malloc failed for chat prompt");
+    }
+    snprintf(
+        prompt,
+        prompt_size,
+        "%s%s%s%s%s",
+        first_turn ? first : "",
+        separator,
+        prefix,
+        line,
+        suffix
+    );
+    size_t token_count = 0;
+    int* token = NULL;
+    tokenizer_tokenize(tokenizer, prompt, false, false, &token_count, &token);
+    free(prompt);
+
+    // Reserve space for at least one reply token and the turn ending.
+    size_t remaining_count =
+        transformer->config->context_len - transformer->state->cached_count;
+    if (remaining_count < 2 || token_count > remaining_count - 2) {
+      free(token);
+      fprintf(stderr, "\nChat context is full; start a new session.\n");
+      break;
+    }
+    size_t reply_count =
+        UTIL_MIN(options->step_count, remaining_count - token_count - 1);
+    int predicted_token = token[token_count - 1];
+    bool done = false;
+    fprintf(stderr, "Assistant: ");
+    fflush(stderr);
+#pragma omp parallel shared(predicted_token, done)
+    {
+      transformer_predict(transformer, token_count, token, 1, logits);
+      for (size_t i = 0; i < reply_count; i++) {
+#pragma omp single
+        {
+          predicted_token = sampler_sample(sampler, logits, predicted_token);
+          done = predicted_token == ending_token[0] ||
+                 safetensors_is_eos(safetensors, predicted_token);
+          if (!done) {
+            tokenizer_print_token(stdout, tokenizer, predicted_token);
+            fflush(stdout);
+          }
+        }
+        if (done) {
+          break;
+        }
+        // Consume even the last visible token so the next turn sees it.
+        transformer_predict(transformer, 1, &predicted_token, 1, logits);
+      }
+      // Also close replies truncated by -n, without printing the delimiter.
+      transformer_predict(transformer, 1, ending_token, 1, logits);
+    }
+    printf("\n");
+    fflush(stdout);
+    free(token);
   }
+  free(line);
+  free(logits);
+  free(ending_token);
+}
 
-  if (options->show_model) {
-    safetensors_print_model_infos(stderr, safetensors);
-    safetensors_free(safetensors);
-    options_free(options);
-    return EXIT_SUCCESS;
-  }
-
-  // - Tokenizer (ugly getting EOS/BOS from safetensors at the moment)
-  tokenizer_t* tokenizer = tokenizer_read(options);
-  tokenizer->bos_token_id = safetensors->bos_token_id;
-  tokenizer->eos_token_id = safetensors->eos_token_id;
-  tokenizer_print(stderr, tokenizer);
-  fprintf(stderr, "\n");
-
-  // - Transformer model from safetensors
-  transformer_t* transformer = transformer_from_safetensors(safetensors);
-  transformer_print(stderr, transformer);
-  fprintf(stderr, "\n");
-
-  // - Sampler for next-token selection
-  sampler_t* sampler = sampler_build(options, transformer);
-  sampler_print(stderr, sampler);
-  fprintf(stderr, "\n");
-#ifdef DEBUG
-  sampler->tokenizer = tokenizer; // For debug prints
-#endif
-
+static void generate(
+    options_t* options,
+    safetensors_t* safetensors,
+    tokenizer_t* tokenizer,
+    transformer_t* transformer,
+    sampler_t* sampler
+) {
   // Get the prompt, either from file or command line argument
   char* prompt = NULL;
   char* file_prompt = NULL;
@@ -167,16 +247,10 @@ int main(int argc, char* argv[]) {
         prompt, &token_count, &token, false, tokenizer->bos_token_id
     );
   } else {
-    bool add_bos = options->instruct ? false : true;
-    tokenizer_tokenize(tokenizer, prompt, add_bos, false, &token_count, &token);
+    tokenizer_tokenize(tokenizer, prompt, true, false, &token_count, &token);
   }
   if (token_count < 1) {
     UTIL_ERROR("expected at least 1 prompt token");
-  }
-  if (options->instruct) {
-    format_instruction_tokens_pre_tokenized(
-        &token_count, &token, safetensors->model_type
-    );
   }
   tokenizer_print_tokens(tokenizer, stderr, token_count, token, 4);
   fprintf(stderr, "\n");
@@ -217,6 +291,7 @@ int main(int argc, char* argv[]) {
       // - Print the decoded token bytes
       tokenizer_print_token(stdout, tokenizer, predicted_token);
       generated_count++;
+      continue_generation = !safetensors_is_eos(safetensors, predicted_token);
 
       start = time_in_ms();
     }
@@ -232,7 +307,7 @@ int main(int argc, char* argv[]) {
 
         predicted_token = sampler_sample(sampler, logits, predicted_token);
         generated_count++;
-        if (predicted_token != tokenizer->eos_token_id) {
+        if (!safetensors_is_eos(safetensors, predicted_token)) {
           tokenizer_print_token(stdout, tokenizer, predicted_token);
           // If we want to dump token ids
           // fprintf(stdout, "%d ", predicted_token);
@@ -272,13 +347,100 @@ int main(int argc, char* argv[]) {
   if (options->use_prompt_file) {
     free(file_prompt);
   }
+  free(logits);
+  free(token);
+}
+
+int main(int argc, char* argv[]) {
+  // Prepare all the components needed for text generation:
+  // - Options from command line arguments
+  options_t* options = options_read(argc, argv);
+  options_print(stderr, options);
+  fprintf(stderr, "\n");
+
+  // Let all processes and threads print their IDs
+  if (MPI_Init(&argc, &argv) != MPI_SUCCESS) {
+    UTIL_DIE("MPI_Init failed");
+  }
+  if (MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank) != MPI_SUCCESS) {
+    UTIL_DIE("MPI_Comm_rank failed");
+  }
+  if (MPI_Comm_size(MPI_COMM_WORLD, &mpi_size) != MPI_SUCCESS) {
+    UTIL_DIE("MPI_Comm_size failed");
+  }
+
+  if (options->chat && mpi_size != 1) {
+    UTIL_ERROR("--chat requires a single MPI rank (threads are supported)");
+  }
+
+  // Set OpenMP parameters
+  // Let chat workers sleep while waiting for user input instead of spinning.
+  setenv("OMP_WAIT_POLICY", options->chat ? "PASSIVE" : "ACTIVE", 1);
+  omp_set_num_threads(options->thread_count);
+
+#pragma omp parallel
+  fprintf(
+      stderr,
+      "StrasGPT OpenMP thread %2d (total %2d) of MPI rank %2d (total %2d)\n",
+      omp_get_thread_num(),
+      omp_get_num_threads(),
+      mpi_rank,
+      mpi_size
+  );
+
+  if (mpi_rank == 0) {
+    fprintf(stderr, "\n");
+  }
+
+  // - Safetensors model files
+  safetensors_t* safetensors = safetensors_read(options);
+  if (options->show_safetensors) {
+    safetensors_print(stderr, safetensors);
+    safetensors_free(safetensors);
+    options_free(options);
+    return EXIT_SUCCESS;
+  }
+
+  if (options->show_model) {
+    safetensors_print_model_infos(stderr, safetensors);
+    safetensors_free(safetensors);
+    options_free(options);
+    return EXIT_SUCCESS;
+  }
+
+  // - Tokenizer (ugly getting EOS/BOS from safetensors at the moment)
+  tokenizer_t* tokenizer = tokenizer_read(options);
+  tokenizer->bos_token_id = safetensors->bos_token_id;
+  tokenizer->eos_token_id =
+      safetensors->eos_token_count ? safetensors->eos_token_id[0] : -1;
+  tokenizer_print(stderr, tokenizer);
+  fprintf(stderr, "\n");
+
+  // - Transformer model from safetensors
+  transformer_t* transformer = transformer_from_safetensors(safetensors);
+  transformer_print(stderr, transformer);
+  fprintf(stderr, "\n");
+
+  // - Sampler for next-token selection
+  sampler_t* sampler = sampler_build(options, transformer);
+  sampler_print(stderr, sampler);
+  fprintf(stderr, "\n");
+#ifdef DEBUG
+  sampler->tokenizer = tokenizer; // For debug prints
+#endif
+
+  if (options->chat) {
+    chat(options, safetensors, tokenizer, transformer, sampler);
+  } else {
+    generate(options, safetensors, tokenizer, transformer, sampler);
+  }
+
+  // Cleanup
   safetensors_free(safetensors);
   tokenizer_free(tokenizer);
   transformer_free(transformer);
   sampler_free(sampler);
   options_free(options);
-  free(logits);
-  free(token);
   json_scanner_lex_destroy();
 
   if (MPI_Finalize() != MPI_SUCCESS) {

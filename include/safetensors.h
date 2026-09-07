@@ -84,6 +84,7 @@ struct options;
 #define SAFETENSORS_PATTERN_OUT_WEIGHT \
   "lm_head.weight"
 // clang-format on
+#define SAFETENSORS_MAX_EOS_TOKEN_COUNT     16
 #define SAFETENSORS_MAX_FILE_COUNT          64
 #define SAFETENSORS_MAX_DIM_COUNT           8
 #define SAFETENSORS_MAX_LAYER_COUNT         1024
@@ -156,7 +157,8 @@ typedef struct safetensors {
 
   // Special tokens from the configuration file
   int bos_token_id; // Beginning of string token id
-  int eos_token_id; // End of string token id
+  size_t eos_token_count; // Number of end of string token ids
+  int eos_token_id[SAFETENSORS_MAX_EOS_TOKEN_COUNT];
 
   // File names where tensors are stored
   size_t file_count;
@@ -167,6 +169,7 @@ typedef struct safetensors {
   safetensors_tensor_t tensor[SAFETENSORS_MAX_TENSOR_COUNT];
 } safetensors_t;
 
+bool safetensors_is_eos(const safetensors_t* safetensors, int token);
 safetensors_t* safetensors_malloc(void);
 void safetensors_free(safetensors_t* safetensors);
 void safetensors_print(FILE* f, const safetensors_t* safetensors);
