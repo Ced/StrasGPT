@@ -336,6 +336,8 @@ null              null
     if (!strcmp(yytext, "\"pre_tokenizer\"")) return PRE_TOKENIZER;
     if (!strcmp(yytext, "\"normalizer\"")) return NORMALIZER;
     if (!strcmp(yytext, "\"ignore_merges\"")) return IGNORE_MERGES;
+    if (!strcmp(yytext, "\"byte_fallback\"")) return BYTE_FALLBACK;
+    if (!strcmp(yytext, "\"decoder\"")) return DECODER;
   }
   yylval.string = decode_json_string(yytext);
   return STRING;

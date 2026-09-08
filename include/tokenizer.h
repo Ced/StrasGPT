@@ -25,6 +25,22 @@ typedef struct {
   size_t rank;
 } tokenizer_merge_t;
 
+// The supported Metaspace variant uses U+2581, prepend=first, split=false.
+typedef struct {
+  bool enabled;
+  size_t pre_tokenizer_count;
+  bool replacement;
+  bool first;
+  bool unsplit;
+  bool byte_fallback;
+  size_t decoder_type_count;
+  bool decoder_invalid;
+  bool decoder_replace;
+  size_t decoder_content_count;
+  bool decoder_strip_start;
+  bool decoder_strip_stop;
+} tokenizer_metaspace_t;
+
 typedef struct tokenizer {
   size_t token_string_count; // Largest token id + 1, including added tokens
   char* token_string[TOKENIZER_MAX_TOKEN_STRING];
@@ -38,6 +54,8 @@ typedef struct tokenizer {
   size_t merge_capacity;
   tokenizer_merge_t* merge;
   int byte_token[256];
+
+  tokenizer_metaspace_t metaspace;
 
   // Supported ByteLevel pre-tokenizer settings
   char* pattern;
@@ -63,6 +81,9 @@ void tokenizer_set_pattern(tokenizer_t* t, char* pattern);
 
 char* tokenizer_decode(tokenizer_t* t, int token);
 void tokenizer_print_token(FILE* f, tokenizer_t* t, int token);
+void tokenizer_print_sequence(
+    FILE* f, tokenizer_t* t, size_t token_count, int* token
+);
 void tokenizer_tokenize(
     tokenizer_t* t,
     char* text,

@@ -10,7 +10,7 @@ import tempfile
 import unicodedata
 
 from tokenizers import AddedToken, Regex, Tokenizer, models, normalizers
-from tokenizers import pre_tokenizers, trainers
+from tokenizers import decoders, pre_tokenizers, trainers
 
 CONTRACTIONS = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
 SPACE = r"|\s*[\r\n]+|\s+(?!\S)|\s+"
@@ -62,8 +62,9 @@ def compare(binary, path, texts):
     result = subprocess.run(
         [str(binary), str(path)],
         input="".join(x.encode().hex() + "\n" for x in texts),
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True,
     )
+    assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
     assert len(lines) == 2 * len(texts), result.stdout
     for i, text in enumerate(texts):
@@ -71,8 +72,11 @@ def compare(binary, path, texts):
         actual = list(map(int, lines[2 * i].split()))
         assert actual == expected, (str(path), repr(text), actual, expected)
         decoded = bytes.fromhex(lines[2 * i + 1])
-        normalized = (unicodedata.normalize("NFC", text)
-                      if data.get("normalizer") else text)
+        if data.get("pre_tokenizer", {}).get("type") == "Metaspace":
+            normalized = reference.decode(expected, skip_special_tokens=False)
+        else:
+            normalized = (unicodedata.normalize("NFC", text)
+                          if data.get("normalizer") else text)
         assert decoded == normalized.encode(), (repr(text), decoded)
     print(f"{path.name}: {len(texts)} reference comparisons passed")
 
@@ -112,6 +116,76 @@ def fixture(path, index, texts):
     return data
 
 
+def metaspace_fixture(path):
+    tokenizer = Tokenizer(models.BPE(unk_token="<unk>", byte_fallback=True))
+    tokenizer.pre_tokenizer = pre_tokenizers.Metaspace(
+        replacement="\u2581", prepend_scheme="first", split=False,
+    )
+    tokenizer.decoder = decoders.Sequence([
+        decoders.Replace("\u2581", " "), decoders.ByteFallback(),
+        decoders.Fuse(), decoders.Strip(" ", 1, 0),
+    ])
+    tokenizer.train_from_iterator([
+        "Hello world", "Once upon a time", "a ab abc", "hello  world ",
+    ], trainers.BpeTrainer(vocab_size=80, special_tokens=["<unk>"],
+                           initial_alphabet=["\u2581"], show_progress=False))
+    tokenizer.add_special_tokens([
+        AddedToken("<|test|>", normalized=False, special=True),
+        AddedToken("<|test_long|>", normalized=False, special=True),
+    ])
+    data = json.loads(tokenizer.to_str())
+    vocab = data["model"]["vocab"]
+    for token in data["added_tokens"]:
+        vocab[token["content"]] = token["id"]
+    first = max(list(vocab.values()) +
+                [t["id"] for t in data["added_tokens"]]) + 1
+    for i in range(256):
+        vocab[f"<0x{i:02X}>"] = first + i
+    count = len(vocab)
+    data["model"]["vocab"] = {k: count - 1 - v
+                              for k, v in reversed(list(vocab.items()))}
+    for token in data["added_tokens"]:
+        token["id"] = count - 1 - token["id"]
+    data["model"]["merges"] = [" ".join(pair)
+                               for pair in data["model"]["merges"]]
+    path.mkdir()
+    (path / "tokenizer.json").write_text(json.dumps(data))
+    return data
+
+
+def invalid_metaspace(binary, path, data):
+    cases = []
+    for key, value in [("split", True), ("replacement", "_"),
+                       ("prepend_scheme", "always")]:
+        wrong = copy.deepcopy(data)
+        wrong["pre_tokenizer"][key] = value
+        cases.append(wrong)
+    wrong = copy.deepcopy(data)
+    wrong["pre_tokenizer"] = {"type": "Sequence", "pretokenizers": [
+        wrong["pre_tokenizer"], copy.deepcopy(wrong["pre_tokenizer"]),
+    ]}
+    cases.append(wrong)
+    wrong = copy.deepcopy(data)
+    wrong["model"]["byte_fallback"] = False
+    cases.append(wrong)
+    wrong = copy.deepcopy(data)
+    del wrong["model"]["vocab"]["<0xFF>"]
+    cases.append(wrong)
+    wrong = copy.deepcopy(data)
+    wrong["decoder"]["decoders"][-1]["start"] = 0
+    cases.append(wrong)
+    wrong = copy.deepcopy(data)
+    wrong["decoder"]["decoders"].reverse()
+    cases.append(wrong)
+    for wrong in cases:
+        (path / "tokenizer.json").write_text(json.dumps(wrong))
+        result = subprocess.run([str(binary), str(path)],
+                                capture_output=True, text=True)
+        assert result.returncode != 0, wrong
+        assert "AddressSanitizer" not in result.stderr, result.stderr
+    print(f"{len(cases)} unsupported Metaspace configurations rejected")
+
+
 def invalid(binary, path, data):
     cases = []
     wrong = copy.deepcopy(data)
@@ -146,6 +220,13 @@ def main():
             data = fixture(path, i, texts)
             compare(args.binary.resolve(), path, texts)
         invalid(args.binary.resolve(), path, data)
+        path = Path(tmp) / "metaspace"
+        data = metaspace_fixture(path)
+        compare(args.binary.resolve(), path, texts + [
+            " hello", "  hello", "\u2581hello", "<|test|>hello",
+            "<|test|> hello", "a<|test|>b", "\u4e2d\u6587\U0010ffff",
+        ])
+        invalid_metaspace(args.binary.resolve(), path, data)
     for path in args.models:
         compare(args.binary.resolve(), path, texts)
 

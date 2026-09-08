@@ -257,9 +257,7 @@ static void generate(
 
   // Print the prompt string (in blue)
   fprintf(stderr, "\033[1;34m");
-  for (size_t i = 0; i < token_count; i++) {
-    tokenizer_print_token(stderr, tokenizer, token[i]);
-  }
+  tokenizer_print_sequence(stderr, tokenizer, token_count, token);
   fprintf(stderr, "\033[0m");
 
   // Prepare timing

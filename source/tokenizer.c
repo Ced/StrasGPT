@@ -1,4 +1,4 @@
-// Simple, self-contained byte-level BPE, focused on English and French.
+// Simple, self-contained BPE with ByteLevel and Metaspace input paths.
 
 #include "options.h"
 #include "tokenizer.h"
@@ -28,6 +28,11 @@ void tokenizer_free(tokenizer_t* t) {
   }
   for (size_t i = 0; i < t->merge_count; i++) {
     free(t->merge[i].string);
+  }
+  if (t->metaspace.enabled) {
+    for (size_t i = 0; i < t->sorted_token_string_count; i++) {
+      free(t->sorted_token_string[i].token_string);
+    }
   }
   free(t->merge);
   free(t->pattern);
@@ -67,7 +72,7 @@ void tokenizer_add_merge(tokenizer_t* t, char* string) {
   t->merge_count++;
 }
 
-// Read one valid UTF-8 codepoint. BPE itself operates on bytes.
+// Read one valid UTF-8 codepoint.
 static unsigned int utf8_read(const char** text) {
   const unsigned char* p = (const unsigned char*)*text;
   unsigned int cp = *p++;
@@ -215,13 +220,64 @@ void tokenizer_set_pattern(tokenizer_t* t, char* pattern) {
   UTIL_ERROR("unsupported tokenizer split pattern");
 }
 
+// Keep raw spellings in the lookup index, and decoded bytes in token_string.
+// This separation preserves the distinction between 'a' and '<0x61>'.
+static void metaspace_prepare(tokenizer_t* t) {
+  tokenizer_metaspace_t* m = &t->metaspace;
+  if (t->byte_level || t->pattern || t->normalize || t->ignore_merges ||
+      m->pre_tokenizer_count != 1 || !m->replacement || !m->first ||
+      !m->unsplit || !m->byte_fallback ||
+      m->decoder_invalid || m->decoder_type_count != 5 || !m->decoder_replace ||
+      m->decoder_content_count != 2 || !m->decoder_strip_start ||
+      !m->decoder_strip_stop) {
+    UTIL_ERROR("unsupported Metaspace tokenizer configuration");
+  }
+  if (str_lookup(t, "\xe2\x96\x81", 3) < 0) {
+    UTIL_ERROR("missing Metaspace space token");
+  }
+  for (size_t i = 0; i < 256; i++) {
+    char string[7];
+    snprintf(string, sizeof(string), "<0x%02X>", (unsigned int)i);
+    t->byte_token[i] = str_lookup(t, string, 6);
+    if (t->byte_token[i] < 0) {
+      UTIL_ERROR("missing Metaspace byte fallback token");
+    }
+  }
+  for (size_t i = 0; i < t->sorted_token_string_count; i++) {
+    int id = t->sorted_token_string[i].id;
+    const char* in = t->token_string[id];
+    char* decoded = malloc(strlen(in) + 1);
+    if (!decoded) {
+      UTIL_DIE("failed to malloc for Metaspace decoded token");
+    }
+    size_t len = 0;
+    while (*in) {
+      if (!strncmp(in, "\xe2\x96\x81", 3)) {
+        decoded[len++] = ' ';
+        in += 3;
+      } else {
+        decoded[len++] = *in++;
+      }
+    }
+    decoded[len] = '\0';
+    t->token_string[id] = decoded;
+    t->token_string_len[id] = len;
+  }
+  for (size_t i = 0; i < 256; i++) {
+    int id = t->byte_token[i];
+    t->token_string[id][0] = (char)i;
+    t->token_string[id][1] = '\0';
+    t->token_string_len[id] = 1;
+  }
+}
+
 tokenizer_t* parser_parse_tokenizer(const char* path);
 // Load the supported tokenizer.json subset, not arbitrary HF pipelines.
 // The parser rejects unsupported normalizer types and added-token options.
 // Scans, arrays and binary searches keep the implementation straightforward.
 tokenizer_t* tokenizer_read(options_t* options) {
   tokenizer_t* t = parser_parse_tokenizer(options->model_dir);
-  if (!t->byte_level || !t->pattern) {
+  if (!t->metaspace.enabled && (!t->byte_level || !t->pattern)) {
     UTIL_ERROR("expected a supported Split + ByteLevel tokenizer");
   }
   for (size_t i = 0; i < 256; i++) {
@@ -237,8 +293,8 @@ tokenizer_t* tokenizer_read(options_t* options) {
       t->added_token[t->added_count++] = (int)i;
       len = strlen(string);
     } else {
-      len = decode_bpe_bytes(string);
-      if (len == 1) {
+      len = t->metaspace.enabled ? strlen(string) : decode_bpe_bytes(string);
+      if (!t->metaspace.enabled && len == 1) {
         t->byte_token[(unsigned char)string[0]] = (int)i;
       }
       t->sorted_token_string[t->sorted_token_string_count++] =
@@ -247,7 +303,7 @@ tokenizer_t* tokenizer_read(options_t* options) {
     t->token_string_len[i] = len;
   }
   for (size_t i = 0; i < 256; i++) {
-    if (t->byte_token[i] < 0) {
+    if (!t->metaspace.enabled && t->byte_token[i] < 0) {
       UTIL_ERROR("missing ByteLevel byte token");
     }
   }
@@ -264,8 +320,10 @@ tokenizer_t* tokenizer_read(options_t* options) {
       UTIL_ERROR("invalid tokenizer merge pair");
     }
     *right++ = '\0';
-    size_t left_len = decode_bpe_bytes(m->string);
-    size_t right_len = decode_bpe_bytes(right);
+    size_t left_len = t->metaspace.enabled ? strlen(m->string)
+                                          : decode_bpe_bytes(m->string);
+    size_t right_len = t->metaspace.enabled ? strlen(right)
+                                           : decode_bpe_bytes(right);
     m->left = str_lookup(t, m->string, left_len);
     m->right = str_lookup(t, right, right_len);
     memmove(m->string + left_len, right, right_len);
@@ -281,6 +339,9 @@ tokenizer_t* tokenizer_read(options_t* options) {
     if (!compare_merges(t->merge + i - 1, t->merge + i)) {
       UTIL_ERROR("duplicate tokenizer merge pair");
     }
+  }
+  if (t->metaspace.enabled) {
+    metaspace_prepare(t);
   }
   return t;
 }
@@ -304,6 +365,22 @@ void tokenizer_print_token(FILE* f, tokenizer_t* t, int token) {
     len = t->token_string_len[token];
   }
   fwrite(string, 1, len, f);
+  fflush(f);
+}
+
+// Strip exactly one leading space from a complete Metaspace sequence.
+// Individual token printing preserves bytes for incremental generation.
+void tokenizer_print_sequence(
+    FILE* f, tokenizer_t* t, size_t token_count, int* token
+) {
+  for (size_t i = 0; i < token_count; i++) {
+    char* string = tokenizer_decode(t, token[i]);
+    if (t->metaspace.enabled && i == 0 && string[0] == ' ') {
+      fwrite(string + 1, 1, t->token_string_len[token[i]] - 1, f);
+    } else {
+      tokenizer_print_token(f, t, token[i]);
+    }
+  }
   fflush(f);
 }
 
@@ -543,22 +620,10 @@ static size_t piece_end(
   return start + 1;
 }
 
-// Merge only within this piece. ignore_merges allows a direct vocabulary
-// lookup of the complete piece before applying ordered pair merges.
-static void encode_piece(
-    tokenizer_t* t, char* text, size_t len, size_t* token_count, int* token
+// Merge an already initialized sequence, preserving leftmost rank ties.
+static void merge_tokens(
+    tokenizer_t* t, size_t start, size_t* token_count, int* token
 ) {
-  if (t->ignore_merges) {
-    int id = str_lookup(t, text, len);
-    if (id >= 0) {
-      token[(*token_count)++] = id;
-      return;
-    }
-  }
-  size_t start = *token_count;
-  for (size_t i = 0; i < len; i++) {
-    token[(*token_count)++] = t->byte_token[(unsigned char)text[i]];
-  }
   while (*token_count > start + 1) {
     size_t best_rank = SIZE_MAX;
     size_t best_index = 0;
@@ -582,6 +647,57 @@ static void encode_piece(
     }
     (*token_count)--;
   }
+}
+
+// Merge only within this piece. ignore_merges allows a direct vocabulary
+// lookup of the complete piece before applying ordered pair merges.
+static void encode_piece(
+    tokenizer_t* t, char* text, size_t len, size_t* token_count, int* token
+) {
+  if (t->ignore_merges) {
+    int id = str_lookup(t, text, len);
+    if (id >= 0) {
+      token[(*token_count)++] = id;
+      return;
+    }
+  }
+  size_t start = *token_count;
+  for (size_t i = 0; i < len; i++) {
+    token[(*token_count)++] = t->byte_token[(unsigned char)text[i]];
+  }
+  merge_tokens(t, start, token_count, token);
+}
+
+// Metaspace works on Unicode characters, falling back to bytes only when a
+// character is absent. No prefix is inserted after an added token.
+static void encode_metaspace(
+    tokenizer_t* t, const char* text, size_t len, bool first,
+    size_t* token_count, int* token
+) {
+  if (!len) {
+    return;
+  }
+  size_t start = *token_count;
+  int space = str_lookup(t, "\xe2\x96\x81", 3);
+  if (first && text[0] != ' ' && strncmp(text, "\xe2\x96\x81", 3)) {
+    token[(*token_count)++] = space;
+  }
+  const char* end = text + len;
+  while (text < end) {
+    const char* next = text;
+    unsigned int cp = utf8_read(&next);
+    size_t size = (size_t)(next - text);
+    int id = cp == ' ' ? space : str_lookup(t, (char*)text, size);
+    if (id >= 0) {
+      token[(*token_count)++] = id;
+    } else {
+      for (size_t i = 0; i < size; i++) {
+        token[(*token_count)++] = t->byte_token[(unsigned char)text[i]];
+      }
+    }
+    text = next;
+  }
+  merge_tokens(t, start, token_count, token);
 }
 
 static void encode_text(
@@ -646,7 +762,7 @@ static void encode_text(
 // Input must be valid UTF-8 without embedded NUL. Match literal added tokens
 // before normalization, choosing the longest match at the earliest position.
 // Their single_word, lstrip, rstrip and normalized options must be false.
-// Instruction wrapping is handled by the application.
+// Chat formatting is handled by the application.
 //
 // Tokenizer corrections can change prompt IDs and generated text without
 // changing inference arithmetic. Compare builds using the same tokenizer
@@ -663,10 +779,10 @@ void tokenizer_tokenize(
     UTIL_DIE("cannot encode NULL text");
   }
   size_t len = strlen(text);
-  if (len > SIZE_MAX / sizeof(**token_ptr) - 2) {
+  if (len > SIZE_MAX / sizeof(**token_ptr) - 3) {
     UTIL_ERROR("tokenizer input is too large");
   }
-  int* token = malloc((len + 2) * sizeof(*token));
+  int* token = malloc((len + 3) * sizeof(*token));
   if (!token) {
     UTIL_DIE("failed to malloc for tokens");
   }
@@ -675,6 +791,7 @@ void tokenizer_tokenize(
   if (bos && t->bos_token_id >= 0) {
     token[(*token_count)++] = t->bos_token_id;
   }
+  const char* begin = text;
   const char* end = text + len;
   while (text < end) {
     // Added tokens are literal, non-normalized strings in supported files.
@@ -691,7 +808,13 @@ void tokenizer_tokenize(
         added_len = size;
       }
     }
-    encode_text(t, text, (size_t)(next - text), token_count, token);
+    if (t->metaspace.enabled) {
+      encode_metaspace(
+          t, text, (size_t)(next - text), text == begin, token_count, token
+      );
+    } else {
+      encode_text(t, text, (size_t)(next - text), token_count, token);
+    }
     if (added_id >= 0) {
       token[(*token_count)++] = added_id;
     }

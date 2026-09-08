@@ -70,11 +70,17 @@ int main(int argc, char** argv) {
       printf("%s%d", i ? " " : "", token[i]);
     }
     printf("\n");
-    for (size_t i = 0; i < count; i++) {
-      for (size_t j = 0; j < t->token_string_len[token[i]]; j++) {
-        printf("%02x", (unsigned char)t->token_string[token[i]][j]);
-      }
+    bytes = tmpfile();
+    if (!bytes) {
+      return EXIT_FAILURE;
     }
+    tokenizer_print_sequence(bytes, t, count, token);
+    rewind(bytes);
+    int byte;
+    while ((byte = fgetc(bytes)) != EOF) {
+      printf("%02x", byte);
+    }
+    fclose(bytes);
     printf("\n");
     free(token);
   }

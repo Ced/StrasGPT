@@ -68,6 +68,7 @@
 %token MHA_OUTPUT_GATE
 %token FULL_ATTENTION LINEAR_ATTENTION SLIDING_ATTENTION
 %token BPE_TYPE MERGES ADDED_TOKENS PRE_TOKENIZER NORMALIZER IGNORE_MERGES
+%token BYTE_FALLBACK DECODER
 %token MODE_CONFIG MODE_INDEX MODE_SAFETENSORS MODE_TOKENIZER
 %start entry
 
@@ -614,6 +615,13 @@ tokenizer_member
     }
     tokenizer_metadata_value
     { json_scanner_leave_kw_as_string_mode(); }
+  | DECODER ':'
+    {
+      parser_metadata_mode = 3;
+      json_scanner_enter_kw_as_string_mode();
+    }
+    tokenizer_metadata_value
+    { json_scanner_leave_kw_as_string_mode(); }
   | NORMALIZER ':'
     {
       parser_metadata_mode = 2;
@@ -651,6 +659,8 @@ tokenizer_model_member
     { json_scanner_leave_kw_as_string_mode(); }
   | IGNORE_MERGES ':' BOOLEAN
     { parser_tokenizer->ignore_merges = $3; }
+  | BYTE_FALLBACK ':' BOOLEAN
+    { parser_tokenizer->metaspace.byte_fallback = $3; }
   | STRING ':'
     { json_scanner_enter_kw_as_string_mode(); }
     json_value
@@ -792,14 +802,33 @@ tokenizer_metadata_member
   : STRING ':' STRING { tokenizer_metadata_string($1, $3); }
   | STRING ':' BOOLEAN
     {
-      if ($3 && (!strcmp($1, "add_prefix_space") ||
+      if (parser_metadata_mode == 1 && $3 &&
+          (!strcmp($1, "add_prefix_space") ||
                  !strcmp($1, "use_regex") || !strcmp($1, "invert"))) {
         yyerror("unsupported ByteLevel pre-tokenizer option");
         YYABORT;
       }
+      if (parser_metadata_mode == 3) {
+        parser_tokenizer->metaspace.decoder_invalid = true;
+      }
+      if (parser_metadata_mode == 1 && !strcmp($1, "split")) {
+        parser_tokenizer->metaspace.unsplit = !$3;
+      }
       free($1);
     }
-  | STRING ':' NUMBER { free($1); }
+  | STRING ':' NUMBER
+    {
+      if (parser_metadata_mode == 3) {
+        if (!strcmp($1, "start") && $3.is_int && $3.ival == 1) {
+          parser_tokenizer->metaspace.decoder_strip_start = true;
+        } else if (!strcmp($1, "stop") && $3.is_int && $3.ival == 0) {
+          parser_tokenizer->metaspace.decoder_strip_stop = true;
+        } else {
+          parser_tokenizer->metaspace.decoder_invalid = true;
+        }
+      }
+      free($1);
+    }
   | STRING ':' NULL_ { free($1); }
   | STRING ':' '{' tokenizer_metadata_members '}' { free($1); }
   | STRING ':' '[' tokenizer_metadata_values ']' { free($1); }
@@ -1026,14 +1055,46 @@ tokenizer_t* parser_parse_tokenizer(const char* path) {
   return parser_tokenizer;
 }
 
+// Match only the Replace -> ByteFallback -> Fuse -> Strip decoder chain.
+static void metaspace_decoder_string(char* key, char* value) {
+  tokenizer_metaspace_t* m = &parser_tokenizer->metaspace;
+  const char* types[] = {
+      "Sequence", "Replace", "ByteFallback", "Fuse", "Strip"
+  };
+  if (!strcmp(key, "type")) {
+    if (m->decoder_type_count >= 5 ||
+        strcmp(value, types[m->decoder_type_count])) {
+      m->decoder_invalid = true;
+    }
+    m->decoder_type_count++;
+  } else if (!strcmp(key, "String") && !strcmp(value, "\xe2\x96\x81")) {
+    m->decoder_replace = true;
+  } else if (!strcmp(key, "content") && !strcmp(value, " ")) {
+    m->decoder_content_count++;
+  } else {
+    m->decoder_invalid = true;
+  }
+}
+
 static void tokenizer_metadata_string(char* key, char* value) {
-  if (parser_metadata_mode == 1) {
-    if (!strcmp(key, "Regex")) {
+  if (parser_metadata_mode == 3) {
+    metaspace_decoder_string(key, value);
+  } else if (parser_metadata_mode == 1) {
+    if (!strcmp(key, "replacement")) {
+      parser_tokenizer->metaspace.replacement =
+          !strcmp(value, "\xe2\x96\x81");
+    } else if (!strcmp(key, "prepend_scheme")) {
+      parser_tokenizer->metaspace.first = !strcmp(value, "first");
+    } else if (!strcmp(key, "Regex")) {
       tokenizer_set_pattern(parser_tokenizer, value);
       value = NULL;
     } else if (!strcmp(key, "type")) {
-      if (!strcmp(value, "ByteLevel")) parser_tokenizer->byte_level = true;
-      else if (strcmp(value, "Sequence") && strcmp(value, "Split")) {
+      parser_tokenizer->metaspace.pre_tokenizer_count++;
+      if (!strcmp(value, "Metaspace")) {
+        parser_tokenizer->metaspace.enabled = true;
+      } else if (!strcmp(value, "ByteLevel")) {
+        parser_tokenizer->byte_level = true;
+      } else if (strcmp(value, "Sequence") && strcmp(value, "Split")) {
         UTIL_ERROR("unsupported pre-tokenizer type");
       }
     } else if (!strcmp(key, "behavior") && strcmp(value, "Isolated")) {

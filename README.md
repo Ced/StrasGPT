@@ -172,6 +172,15 @@ vocabulary order, both merge-list formats, JSON escapes, special tokens and all
 common accents, ligatures, curly apostrophes and ordinary and narrow nonbreaking
 spaces.
 
+Metaspace BPE is also supported for older Mistral models including, e.g.,Mistral-7B: the U+2581
+space marker, `prepend_scheme=first`, `split=false`, and byte fallback.
+Other Metaspace variants are rejected.
+Vocabulary lookup retains raw spellings separately from decoded bytes.
+Complete sequences strip one leading space as specified by the decoder;
+incremental token output preserves bytes, including partial UTF-8 sequences.
+The tests compare token IDs and decoded sequences with Hugging Face and
+check all 256 fallback bytes, added-token boundaries, and rejected settings.
+
 To additionally compare a local checkpoint's tokenizer:
 
 ```bash
