@@ -4,10 +4,10 @@
   <img src="assets/llama_math-info.png" width="300" height="300" alt="Cute Llama">
 </p>
 
-This program is a direct C implementation of the Qwen 3.5 / Qwen3 / LLaMa 3.x /
-Mistral LLM transformer architecture, reusing the tokenizer and the sampler of
-Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c) project and
-its fork by James Delancey
+This program is a direct C implementation of the transformer architecture, capable
+to run inference for, e.g., Qwen 3.5 / GPT-OSS / Mistral / LLaMa 3.x LLMs.
+It originally derived from Andrej Karpathy's
+[llama2.c](https://github.com/karpathy/llama2.c) project and its fork by James Delancey
 [llama3.c](https://github.com/jameswdelancey/llama3.c) (we warmly thank you!).
 Given an input prompt, StrasGPT can generate a text that continues it, and it
 also supports basic interactive chat. It was initially designed as a parallel
@@ -40,26 +40,44 @@ There are several other building targets:
 
 ## Get the model files
 
-You can use, e.g., Qwen 3.5, GPT-OSS, LLaMa 3.x or Mistral checkpoints from HuggingFace. You will need to create an [HuggingFace Account](https://huggingface.co/), and get an access token (click on your profile icon, then "Access Tokens"). Finally you'll need to login then to download the desired models, e.g. here are some tested models:
+You can use, e.g., Qwen (2.5, 3, 3.5), GPT-OSS, LLaMa 3.x or Mistral (Ministral, Nemo, Small) checkpoints from HuggingFace.
+Some open models are provided through direct links for convenience:
+- [GPT-OSS 20b (13.8 GB)](https://seafile.unistra.fr/f/981ea64f2f204db6a444/?dl=1)
+- [Qwen 3.5 0.8B (1.8 GB)](https://seafile.unistra.fr/f/11eb47d34e6d4edc89ec/?dl=1)
+- [Qwen 3.5 4B (9.3 GB)](https://seafile.unistra.fr/f/9c070096fa454283a842/?dl=1)
+- [Qwen 3 0.6B (1.5 GB)](https://seafile.unistra.fr/f/6ec48bc9b8d04f0aad30/?dl=1)
+- [Qwen 3 4B Instruct (8.1 GB)](https://seafile.unistra.fr/f/6ec48bc9b8d04f0aad30/?dl=1)
+- [Ministral 3 3B Instruct (7.7 GB)](https://seafile.unistra.fr/f/af681696bddd472e8c04/?dl=1)
+- [Mistral Nemo 12B Instruct 2407 (24.5 GB)](https://seafile.unistra.fr/f/f83cc292583c48318784/?dl=1)
+- [Mistral Small 24B Base 2501 (47.2GB)](https://seafile.unistra.fr/f/96f6e03c73594d09a5aa/?dl=1)
+
+To get LLaMa model and others, you will need to create an [HuggingFace Account](https://huggingface.co/), and get an access token (click on your profile icon, then "Access Tokens"). Finally you'll need to login then to download the desired models, e.g. here are some tested models:
 
 ```bash
-pip install 'huggingface_hub[cli]'
-huggingface-cli login
-git clone https://huggingface.co/openai/gpt-oss-20b
-git clone https://huggingface.co/Qwen/Qwen3.5-0.8B
-git clone https://huggingface.co/Qwen/Qwen3-0.6B
-git clone https://huggingface.co/Qwen/Qwen3-4B
-git clone https://huggingface.co/Qwen/Qwen3-14B
-git clone https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct
-git clone https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
-git clone https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct
-git clone https://huggingface.co/Qwen/Qwen2.5-0.5B
-git clone https://huggingface.co/meta-llama/Llama-3.2-1B
-git clone https://huggingface.co/meta-llama/Llama-3.2-3B
-git clone https://huggingface.co/meta-llama/Llama-3.1-8B
-git clone https://huggingface.co/mistralai/Mistral-Nemo-Base-2407
-git clone https://huggingface.co/mistralai/Ministral-8B-Instruct-2410
-git clone https://huggingface.co/mistralai/Mistral-Small-24B-Base-2501
+pip install --upgrade huggingface_hub
+hf auth login
+hf download openai/gpt-oss-20b --local-dir ./gpt-oss-20b
+hf download Qwen/Qwen3.5-0.8B --local-dir ./Qwen3.5-0.8B
+hf download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
+hf download Qwen/Qwen3-0.6B --local-dir ./Qwen3-0.6B
+hf download Qwen/Qwen3-4B --local-dir ./Qwen3-4B
+hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir ./Qwen3-4B-Instruct-2507
+hf download Qwen/Qwen3-14B --local-dir ./Qwen3-14B
+hf download Qwen/Qwen3-VL-2B-Instruct --local-dir ./Qwen3-VL-2B-Instruct
+hf download Qwen/Qwen3-VL-4B-Instruct --local-dir ./Qwen3-VL-4B-Instruct
+hf download Qwen/Qwen3-VL-8B-Instruct --local-dir ./Qwen3-VL-8B-Instruct
+hf download Qwen/Qwen2.5-0.5B --local-dir ./Qwen2.5-0.5B
+hf download meta-llama/Llama-3.2-1B --local-dir ./Llama-3.2-1B
+hf download meta-llama/Llama-3.2-3B --local-dir ./Llama-3.2-3B
+hf download meta-llama/Llama-3.2-3B-Instruct --local-dir ./Llama-3.2-3B-Instruct
+hf download meta-llama/Llama-3.1-8B --local-dir ./Llama-3.1-8B
+hf download mistralai/Ministral-3-3B-Instruct-2512-BF16 --local-dir ./Ministral-3-3B-Instruct-2512-BF16
+hf download mistralai/Ministral-8B-Instruct-2410 --local-dir ./Ministral-8B-Instruct-2410
+hf download mistralai/Mistral-Nemo-Base-2407 --local-dir ./Mistral-Nemo-Base-2407
+hf download mistralai/Mistral-Nemo-Instruct-2407 --local-dir ./Mistral-Nemo-Instruct-2407
+hf download mistralai/Mistral-Small-24B-Base-2501 --local-dir ./Mistral-Small-24B-Base-2501
+hf download mistralai/Mistral-7B-Instruct-v0.3 --local-dir ./Mistral-7B-Instruct-v0.3
+hf download TinyLlama/TinyLlama-1.1B-Chat-v1.0 --local-dir ./TinyLlama-1.1B-Chat-v1.0
 ```
 
 ## Run StrasGPT
@@ -104,7 +122,7 @@ model:
 ```bash
 ./strasgpt --chat -m ../model_zoo/Qwen3.5-0.8B -n 256 -s 42
 ./strasgpt --chat -m ../model_zoo/Llama-3.2-3B-Instruct -n 256 -t 10
-./strasgpt --chat -m ../model_zoo/Ministral-3-3B-Instruct-2512-BF16 -n 32 -t 10
+./strasgpt --chat -m ../model_zoo/Ministral-3-3B-Instruct-2512-BF16 -n 256 -t 10
 ```
 
 Enter one message per line. Empty lines are ignored; `/quit` or EOF exits.
@@ -114,80 +132,9 @@ full, start a new session. Qwen 3.5 uses its non-thinking prefix and gpt-oss
 uses the final channel for direct answers.
 
 Chat selects the message format automatically.
-Ministral 3 uses `<s>` once, `[INST]message[/INST]` for each user turn,
-and `</s>` to close each assistant reply.
 It reads stdin and cannot be combined with `-p`, `-f` or `--pre-tokenized`.
 Replies go to stdout and interface labels go to stderr.
 
-## Regression tests
+## Tests
 
-The regression tests need Python, NumPy, PyTorch, safetensors and the
-Hugging Face tokenizers package. Install these in your Python environment,
-then run:
-
-```bash
-python3 -m pip install numpy torch safetensors tokenizers
-make test
-```
-
-Use `make test PYTHON=/path/to/python` to select another Python environment.
-The test generates temporary synthetic checkpoints; no download is needed.
-Test binaries are separate from the normal executable and build objects.
-
-`make test-parallel` additionally compares sequential and 10-thread execution
-(requires the same MPI/OpenMP tools as `make parallel`). `make test-asan`
-runs the regression with AddressSanitizer. All targets accept `PYTHON=...`.
-
-The test checks all MXFP4 codes/scales, including signed zero and NaN scales.
-Dot-product checks cover every code at every block position and scale, plus
-mixed scales, cancellation, odd block counts, long rows and unaligned inputs.
-Two tiny layers exercise attention biases, sinks, sliding windows and MoE
-routing, expert biases, clipping and weighted expert summation. It compares
-the last token's FFN intermediates at each layer and every token's final
-logits against an independent PyTorch FP32 reference. Cases include one or
-multiple selected experts, absent expert biases, disabled clipping, cached
-decoding and a sequence crossing the internal 512-token chunk boundary.
-
-Decoded weights and routing indices are checked exactly. Reference arithmetic
-uses `atol=3e-4, rtol=2e-4` for these small fixtures because FP32 reductions
-can round differently. Chunk sizes and thread counts must produce identical
-binary outputs. Failures report the first mismatching intermediate and index.
-These tests cover the MoE path with ordinary RoPE, not YaRN or native BF16
-reference execution.
-
-### Configuration tests
-
-After building, `python3 test/config/config.py ./strasgpt` checks scalar and
-array EOS token IDs, including malformed arrays, using temporary files.
-It needs only Python's standard library and also works with `make asan`.
-
-### Tokenizer tests
-
-`make test-tokenizer` runs small synthetic comparisons with Hugging Face without
-model downloads; `make test-tokenizer-asan` uses AddressSanitizer. These checks
-are also included in `make test`, `make test-parallel` and `make test-asan`.
-Python dependencies are needed only for testing.
-All targets accept `PYTHON=...`.
-
-The tests cover all five supported splitting patterns, shuffled token IDs and
-vocabulary order, both merge-list formats, JSON escapes, special tokens and all
-256 byte values on output. French cases include precomposed and decomposed
-common accents, ligatures, curly apostrophes and ordinary and narrow nonbreaking
-spaces.
-
-Metaspace BPE is also supported for older Mistral models such as Mistral-7B:
-the U+2581 space marker, `prepend_scheme=first`, `split=false`, and byte fallback.
-TinyLlama's `Prepend` + `Replace` normalizer with no pre-tokenizer is also
-supported. It prefixes every text segment, including after special tokens.
-Other Metaspace variants are rejected.
-Vocabulary lookup retains raw spellings separately from decoded bytes.
-Complete sequences strip one leading space as specified by the decoder;
-incremental token output preserves bytes, including partial UTF-8 sequences.
-The tests compare token IDs and decoded sequences with Hugging Face and
-check all 256 fallback bytes, added-token boundaries, and rejected settings.
-
-To additionally compare a local checkpoint's tokenizer:
-
-```bash
-make test-tokenizer TOKENIZER_MODELS=../model_zoo/Qwen3.5-0.8B
-```
+See `./test/test.md`
