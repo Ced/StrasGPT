@@ -172,8 +172,10 @@ vocabulary order, both merge-list formats, JSON escapes, special tokens and all
 common accents, ligatures, curly apostrophes and ordinary and narrow nonbreaking
 spaces.
 
-Metaspace BPE is also supported for older Mistral models including, e.g.,Mistral-7B: the U+2581
-space marker, `prepend_scheme=first`, `split=false`, and byte fallback.
+Metaspace BPE is also supported for older Mistral models such as Mistral-7B:
+the U+2581 space marker, `prepend_scheme=first`, `split=false`, and byte fallback.
+TinyLlama's `Prepend` + `Replace` normalizer with no pre-tokenizer is also
+supported. It prefixes every text segment, including after special tokens.
 Other Metaspace variants are rejected.
 Vocabulary lookup retains raw spellings separately from decoded bytes.
 Complete sequences strip one leading space as specified by the decoder;

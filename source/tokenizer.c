@@ -225,12 +225,21 @@ void tokenizer_set_pattern(tokenizer_t* t, char* pattern) {
 static void metaspace_prepare(tokenizer_t* t) {
   tokenizer_metaspace_t* m = &t->metaspace;
   if (t->byte_level || t->pattern || t->normalize || t->ignore_merges ||
-      m->pre_tokenizer_count != 1 || !m->replacement || !m->first ||
-      !m->unsplit || !m->byte_fallback ||
+      !m->byte_fallback ||
       m->decoder_invalid || m->decoder_type_count != 5 || !m->decoder_replace ||
       m->decoder_content_count != 2 || !m->decoder_strip_start ||
       !m->decoder_strip_stop) {
     UTIL_ERROR("unsupported Metaspace tokenizer configuration");
+  }
+  if (m->normalizer_type_count) {
+    if (m->pre_tokenizer_count || m->normalizer_type_count != 3 ||
+        !m->normalizer_prepend || !m->normalizer_space ||
+        !m->normalizer_replace) {
+      UTIL_ERROR("expected Prepend + Replace with no pre-tokenizer");
+    }
+  } else if (m->pre_tokenizer_count != 1 || !m->replacement || !m->first ||
+             !m->unsplit) {
+    UTIL_ERROR("expected Metaspace with prepend=first and split=false");
   }
   if (str_lookup(t, "\xe2\x96\x81", 3) < 0) {
     UTIL_ERROR("missing Metaspace space token");
@@ -669,7 +678,7 @@ static void encode_piece(
 }
 
 // Metaspace works on Unicode characters, falling back to bytes only when a
-// character is absent. No prefix is inserted after an added token.
+// character is absent. TinyLlama prepends a space to every text segment.
 static void encode_metaspace(
     tokenizer_t* t, const char* text, size_t len, bool first,
     size_t* token_count, int* token
@@ -679,7 +688,8 @@ static void encode_metaspace(
   }
   size_t start = *token_count;
   int space = str_lookup(t, "\xe2\x96\x81", 3);
-  if (first && text[0] != ' ' && strncmp(text, "\xe2\x96\x81", 3)) {
+  if (t->metaspace.normalizer_type_count ||
+      (first && text[0] != ' ' && strncmp(text, "\xe2\x96\x81", 3))) {
     token[(*token_count)++] = space;
   }
   const char* end = text + len;
@@ -779,10 +789,13 @@ void tokenizer_tokenize(
     UTIL_DIE("cannot encode NULL text");
   }
   size_t len = strlen(text);
-  if (len > SIZE_MAX / sizeof(**token_ptr) - 3) {
+  // TinyLlama may add a prefix after every added token. Reserve enough for
+  // alternating single-byte added tokens and single-byte text segments.
+  size_t token_per_byte_count = t->metaspace.normalizer_type_count ? 2 : 1;
+  if (len > (SIZE_MAX / sizeof(**token_ptr) - 3) / token_per_byte_count) {
     UTIL_ERROR("tokenizer input is too large");
   }
-  int* token = malloc((len + 3) * sizeof(*token));
+  int* token = malloc((len * token_per_byte_count + 3) * sizeof(*token));
   if (!token) {
     UTIL_DIE("failed to malloc for tokens");
   }

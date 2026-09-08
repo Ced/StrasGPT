@@ -802,6 +802,9 @@ tokenizer_metadata_member
   : STRING ':' STRING { tokenizer_metadata_string($1, $3); }
   | STRING ':' BOOLEAN
     {
+      if (parser_metadata_mode == 2) {
+        UTIL_ERROR("unsupported normalizer setting");
+      }
       if (parser_metadata_mode == 1 && $3 &&
           (!strcmp($1, "add_prefix_space") ||
                  !strcmp($1, "use_regex") || !strcmp($1, "invert"))) {
@@ -818,6 +821,9 @@ tokenizer_metadata_member
     }
   | STRING ':' NUMBER
     {
+      if (parser_metadata_mode == 2) {
+        UTIL_ERROR("unsupported normalizer setting");
+      }
       if (parser_metadata_mode == 3) {
         if (!strcmp($1, "start") && $3.is_int && $3.ival == 1) {
           parser_tokenizer->metaspace.decoder_strip_start = true;
@@ -1076,6 +1082,28 @@ static void metaspace_decoder_string(char* key, char* value) {
   }
 }
 
+// TinyLlama normalizes each ordinary-text segment with Prepend + Replace.
+static void metaspace_normalizer_string(char* key, char* value) {
+  tokenizer_metaspace_t* m = &parser_tokenizer->metaspace;
+  const char* types[] = {"Sequence", "Prepend", "Replace"};
+  m->enabled = true;
+  if (!strcmp(key, "type")) {
+    if (m->normalizer_type_count >= 3 ||
+        strcmp(value, types[m->normalizer_type_count])) {
+      UTIL_ERROR("unsupported Metaspace normalizer sequence");
+    }
+    m->normalizer_type_count++;
+  } else if (!strcmp(key, "prepend") && !strcmp(value, "\xe2\x96\x81")) {
+    m->normalizer_prepend = true;
+  } else if (!strcmp(key, "String") && !strcmp(value, " ")) {
+    m->normalizer_space = true;
+  } else if (!strcmp(key, "content") && !strcmp(value, "\xe2\x96\x81")) {
+    m->normalizer_replace = true;
+  } else {
+    UTIL_ERROR("unsupported Metaspace normalizer setting");
+  }
+}
+
 static void tokenizer_metadata_string(char* key, char* value) {
   if (parser_metadata_mode == 3) {
     metaspace_decoder_string(key, value);
@@ -1100,9 +1128,10 @@ static void tokenizer_metadata_string(char* key, char* value) {
     } else if (!strcmp(key, "behavior") && strcmp(value, "Isolated")) {
       UTIL_ERROR("unsupported pre-tokenizer split behavior");
     }
-  } else if (!strcmp(key, "type")) {
-    if (strcmp(value, "NFC")) UTIL_ERROR("unsupported normalizer type");
+  } else if (!strcmp(key, "type") && !strcmp(value, "NFC")) {
     parser_tokenizer->normalize = true;
+  } else {
+    metaspace_normalizer_string(key, value);
   }
   free(key);
   free(value);

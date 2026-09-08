@@ -72,7 +72,7 @@ def compare(binary, path, texts):
         actual = list(map(int, lines[2 * i].split()))
         assert actual == expected, (str(path), repr(text), actual, expected)
         decoded = bytes.fromhex(lines[2 * i + 1])
-        if data.get("pre_tokenizer", {}).get("type") == "Metaspace":
+        if data["model"].get("byte_fallback"):
             normalized = reference.decode(expected, skip_special_tokens=False)
         else:
             normalized = (unicodedata.normalize("NFC", text)
@@ -116,7 +116,7 @@ def fixture(path, index, texts):
     return data
 
 
-def metaspace_fixture(path):
+def metaspace_fixture(path, normalize=False):
     tokenizer = Tokenizer(models.BPE(unk_token="<unk>", byte_fallback=True))
     tokenizer.pre_tokenizer = pre_tokenizers.Metaspace(
         replacement="\u2581", prepend_scheme="first", split=False,
@@ -133,6 +133,15 @@ def metaspace_fixture(path):
         AddedToken("<|test|>", normalized=False, special=True),
         AddedToken("<|test_long|>", normalized=False, special=True),
     ])
+    tokenizer.add_special_tokens([
+        AddedToken("|", normalized=False, special=True),
+    ])
+    if normalize:
+        tokenizer.pre_tokenizer = None
+        tokenizer.normalizer = normalizers.Sequence([
+            normalizers.Prepend("\u2581"),
+            normalizers.Replace(" ", "\u2581"),
+        ])
     data = json.loads(tokenizer.to_str())
     vocab = data["model"]["vocab"]
     for token in data["added_tokens"]:
@@ -186,6 +195,29 @@ def invalid_metaspace(binary, path, data):
     print(f"{len(cases)} unsupported Metaspace configurations rejected")
 
 
+def invalid_normalizer(binary, path, data):
+    cases = []
+    for index, key, value in [(0, "prepend", "_"),
+                              (1, "pattern", {"String": "_"}),
+                              (1, "content", "_")]:
+        wrong = copy.deepcopy(data)
+        wrong["normalizer"]["normalizers"][index][key] = value
+        cases.append(wrong)
+    wrong = copy.deepcopy(data)
+    wrong["normalizer"]["normalizers"].reverse()
+    cases.append(wrong)
+    wrong = copy.deepcopy(data)
+    wrong["normalizer"]["normalizers"].pop()
+    cases.append(wrong)
+    for wrong in cases:
+        (path / "tokenizer.json").write_text(json.dumps(wrong))
+        result = subprocess.run([str(binary), str(path)],
+                                capture_output=True, text=True)
+        assert result.returncode != 0, wrong
+        assert "AddressSanitizer" not in result.stderr, result.stderr
+    print(f"{len(cases)} unsupported normalizer configurations rejected")
+
+
 def invalid(binary, path, data):
     cases = []
     wrong = copy.deepcopy(data)
@@ -227,6 +259,14 @@ def main():
             "<|test|> hello", "a<|test|>b", "\u4e2d\u6587\U0010ffff",
         ])
         invalid_metaspace(args.binary.resolve(), path, data)
+        path = Path(tmp) / "prepend-replace"
+        data = metaspace_fixture(path, normalize=True)
+        compare(args.binary.resolve(), path, texts + [
+            " hello", "  hello", "\u2581hello", "<|test|>hello",
+            "<|test|> hello", "a<|test|>b", "|x" * 200, "x|" * 200,
+            "<|test|><|test_long|>", "\u4e2d\u6587\U0010ffff",
+        ])
+        invalid_normalizer(args.binary.resolve(), path, data)
     for path in args.models:
         compare(args.binary.resolve(), path, texts)
 

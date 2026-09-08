@@ -25,7 +25,7 @@ typedef struct {
   size_t rank;
 } tokenizer_merge_t;
 
-// The supported Metaspace variant uses U+2581, prepend=first, split=false.
+// Supported U+2581 variants: Metaspace(first, unsplit) or Prepend + Replace.
 typedef struct {
   bool enabled;
   size_t pre_tokenizer_count;
@@ -33,6 +33,10 @@ typedef struct {
   bool first;
   bool unsplit;
   bool byte_fallback;
+  size_t normalizer_type_count;
+  bool normalizer_prepend;
+  bool normalizer_space;
+  bool normalizer_replace;
   size_t decoder_type_count;
   bool decoder_invalid;
   bool decoder_replace;
