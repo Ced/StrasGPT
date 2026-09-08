@@ -1042,7 +1042,8 @@ size_t safetensors_sizeof(safetensors_type_t type) {
 bool safetensors_aliased_out_weight(const safetensors_t* safetensors) {
   for (size_t i = 0; i < safetensors->tensor_count; i++) {
     const safetensors_tensor_t* t = &safetensors->tensor[i];
-    if (strcmp(t->name, SAFETENSORS_PATTERN_OUT_WEIGHT) == 0) {
+    if (strcmp(t->name, SAFETENSORS_PATTERN_OUT_WEIGHT) == 0 ||
+        strcmp(t->name, "language_model.lm_head.weight") == 0) {
       return false; // Found the output weight, not aliased
     }
   }

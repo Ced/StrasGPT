@@ -77,7 +77,8 @@ static void chat(
       suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
     }
     ending = "<|im_end|>";
-  } else if (model_type && strstr(model_type, "mistral")) {
+  } else if (model_type && (strstr(model_type, "mistral") ||
+                            strstr(model_type, "ministral"))) {
     first = "<s>";
     prefix = "[INST]";
     suffix = "[/INST]";
@@ -102,7 +103,9 @@ static void chat(
       ending = "<|return|>";
     }
   } else {
-    UTIL_ERROR("--chat supports Qwen, Mistral, Llama 3 and gpt-oss models");
+    UTIL_ERROR(
+        "--chat supports Qwen, Mistral/Ministral, Llama 3 and gpt-oss models"
+    );
   }
 
   size_t ending_count = 0;

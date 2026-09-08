@@ -1238,6 +1238,29 @@ typedef struct {
 // return out if a rewrite occurred, return the original name otherwise.
 static const char* normalize_name(const char* name, size_t out_len, char* out) {
   const name_alias_t alias_table[] = {
+      // Ministral 3 tensor name aliases
+      {SAFETENSORS_PATTERN_EMBEDDING_WEIGHT,
+       "language_model.model.embed_tokens.weight"},
+      {SAFETENSORS_PATTERN_MHA_NORM_WEIGHT,
+       "language_model.model.layers.%d.input_layernorm.weight"},
+      {SAFETENSORS_PATTERN_MHA_Q_WEIGHT,
+       "language_model.model.layers.%d.self_attn.q_proj.weight"},
+      {SAFETENSORS_PATTERN_MHA_K_WEIGHT,
+       "language_model.model.layers.%d.self_attn.k_proj.weight"},
+      {SAFETENSORS_PATTERN_MHA_V_WEIGHT,
+       "language_model.model.layers.%d.self_attn.v_proj.weight"},
+      {SAFETENSORS_PATTERN_MHA_OUT_WEIGHT,
+       "language_model.model.layers.%d.self_attn.o_proj.weight"},
+      {SAFETENSORS_PATTERN_FFN_NORM_WEIGHT,
+       "language_model.model.layers.%d.post_attention_layernorm.weight"},
+      {SAFETENSORS_PATTERN_FFN_FC_WEIGHT,
+       "language_model.model.layers.%d.mlp.gate_proj.weight"},
+      {SAFETENSORS_PATTERN_FFN_UP_WEIGHT,
+       "language_model.model.layers.%d.mlp.up_proj.weight"},
+      {SAFETENSORS_PATTERN_FFN_OUT_WEIGHT,
+       "language_model.model.layers.%d.mlp.down_proj.weight"},
+      {SAFETENSORS_PATTERN_OUT_NORM_WEIGHT, "language_model.model.norm.weight"},
+      {SAFETENSORS_PATTERN_OUT_WEIGHT, "language_model.lm_head.weight"},
       // Embedding tensor name aliases
       {SAFETENSORS_PATTERN_EMBEDDING_WEIGHT,
        "model.language_model.embed_tokens.weight"},

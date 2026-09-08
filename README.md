@@ -104,6 +104,7 @@ model:
 ```bash
 ./strasgpt --chat -m ../model_zoo/Qwen3.5-0.8B -n 256 -s 42
 ./strasgpt --chat -m ../model_zoo/Llama-3.2-3B-Instruct -n 256 -t 10
+./strasgpt --chat -m ../model_zoo/Ministral-3-3B-Instruct-2512-BF16 -n 32 -t 10
 ```
 
 Enter one message per line. Empty lines are ignored; `/quit` or EOF exits.
@@ -113,6 +114,8 @@ full, start a new session. Qwen 3.5 uses its non-thinking prefix and gpt-oss
 uses the final channel for direct answers.
 
 Chat selects the message format automatically.
+Ministral 3 uses `<s>` once, `[INST]message[/INST]` for each user turn,
+and `</s>` to close each assistant reply.
 It reads stdin and cannot be combined with `-p`, `-f` or `--pre-tokenized`.
 Replies go to stdout and interface labels go to stderr.
 
